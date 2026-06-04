@@ -181,7 +181,8 @@ const STYLE = `
 @keyframes rise{to{opacity:1;transform:translateY(0);}}
 .ms-save{position:absolute;right:24px;bottom:calc(118px + env(safe-area-inset-bottom));width:54px;height:54px;border-radius:50%;border:1px solid rgba(255,255,255,.16);background:rgba(255,255,255,.06);backdrop-filter:blur(10px);display:flex;align-items:center;justify-content:center;cursor:pointer;transition:transform .18s,background .2s;color:#F4ECE3;}
 .ms-save:active{transform:scale(.86);}
-.ms-top{position:absolute;top:0;left:0;right:0;z-index:20;padding:calc(16px + env(safe-area-inset-top)) 18px 30px;background:linear-gradient(180deg,rgba(0,0,0,.55),transparent);display:flex;align-items:center;justify-content:space-between;}
+.ms-top{position:absolute;top:0;left:0;right:0;z-index:20;padding:calc(16px + env(safe-area-inset-top)) 18px 30px;background:linear-gradient(180deg,rgba(0,0,0,.55),transparent);display:flex;align-items:center;justify-content:space-between;pointer-events:none;}
+.ms-top>*{pointer-events:auto;}
 .ms-brand{display:flex;align-items:center;gap:8px;font-family:'Fraunces',serif;font-weight:600;font-size:19px;letter-spacing:-.02em;}
 .ms-pills{display:flex;gap:8px;align-items:center;}
 .ms-pill{display:flex;align-items:center;gap:5px;padding:7px 12px;border-radius:999px;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.1);font-size:13px;font-weight:700;cursor:pointer;backdrop-filter:blur(8px);}
@@ -189,7 +190,7 @@ const STYLE = `
 .ms-live{display:flex;align-items:center;gap:6px;padding:6px 10px;border-radius:999px;background:rgba(60,214,245,.14);border:1px solid rgba(60,214,245,.3);font-size:11px;font-weight:800;letter-spacing:.08em;color:#9eecfb;}
 .ms-dot{width:7px;height:7px;border-radius:50%;background:#3DD6F5;box-shadow:0 0 8px #3DD6F5;animation:blink 1.4s ease-in-out infinite;}
 @keyframes blink{0%,100%{opacity:1;}50%{opacity:.25;}}
-.ms-chips{position:absolute;top:58px;left:0;right:0;z-index:19;display:flex;gap:8px;padding:6px 18px 12px;overflow-x:auto;scrollbar-width:none;}
+.ms-chips{position:absolute;top:calc(58px + env(safe-area-inset-top));left:0;right:0;z-index:19;display:flex;gap:8px;padding:6px 18px 12px;overflow-x:auto;scrollbar-width:none;}
 .ms-chips::-webkit-scrollbar{display:none;}
 .ms-chip{flex:0 0 auto;padding:7px 15px;border-radius:999px;font-size:13px;font-weight:600;border:1px solid rgba(255,255,255,.14);background:rgba(255,255,255,.05);color:rgba(244,236,227,.7);cursor:pointer;white-space:nowrap;transition:.18s;backdrop-filter:blur(6px);}
 .ms-chip.act{color:#05060a;font-weight:700;}
