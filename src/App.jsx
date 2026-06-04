@@ -246,10 +246,12 @@ const STYLE = `
 .ms-ov-title{font-family:'Fraunces',serif;font-size:24px;font-weight:600;}
 .ms-ov-list{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:4px 18px calc(6px + env(safe-area-inset-bottom));scrollbar-width:none;}
 .ms-ov-list::-webkit-scrollbar{display:none;}
-.ms-saved-card{position:relative;border-radius:18px;padding:18px 18px 16px;margin-bottom:12px;border:1px solid rgba(255,255,255,.08);overflow:hidden;}
+.ms-saved-card{position:relative;border-radius:18px;padding:18px 48px 16px 18px;margin-bottom:12px;border:1px solid rgba(255,255,255,.08);overflow:hidden;}
 .ms-saved-q{font-family:'Fraunces',serif;font-size:18px;line-height:1.25;font-weight:500;}
 .ms-saved-a{font-size:13px;font-weight:600;margin-top:8px;opacity:.8;}
-.ms-saved-x{position:absolute;top:12px;right:12px;cursor:pointer;opacity:.6;}
+.ms-saved-note{font-size:13px;line-height:1.5;color:rgba(244,236,227,.55);margin-top:10px;}
+.ms-saved-link{display:inline-flex;align-items:center;gap:4px;margin-top:10px;font-size:12px;font-weight:700;text-decoration:none;opacity:.75;}
+.ms-saved-x{position:absolute;top:12px;right:12px;cursor:pointer;opacity:.6;padding:6px;margin:-6px;}
 .ms-empty{text-align:center;color:rgba(244,236,227,.5);font-size:15px;margin-top:60px;line-height:1.6;}
 .ms-close{cursor:pointer;opacity:.8;padding:8px;margin:-8px;}
 .ms-attr{flex-shrink:0;text-align:center;font-size:11.5px;color:rgba(244,236,227,.42);padding:12px 20px calc(20px + env(safe-area-inset-bottom));line-height:1.55;}
@@ -397,7 +399,7 @@ export default function MindScroll() {
     setSaved((prev) => {
       const exists = prev.find((c) => c.text === card.text);
       const next = exists ? prev.filter((c) => c.text !== card.text)
-        : [{ text: card.text, author: card.author, cat: card.cat, url: card.url, source: card.source }, ...prev];
+        : [{ text: card.text, author: card.author, cat: card.cat, url: card.url, source: card.source, note: card.note }, ...prev];
       store.set("saved", next);
       return next;
     });
@@ -410,11 +412,13 @@ export default function MindScroll() {
     setShowSaved(true);
   };
   const closeSaved = () => {
-    if (history.state?.savedOverlay) history.back();
-    else setShowSaved(false);
+    // replaceState instead of back() — avoids browser scroll restoration clobbering snap-feed
+    if (history.state?.savedOverlay) history.replaceState(null, "");
+    setShowSaved(false);
   };
   useEffect(() => {
-    const onPop = (e) => { if (e.state?.savedOverlay === undefined && showSaved) setShowSaved(false); };
+    // Hardware back button / swipe-back: popstate fires, close the overlay
+    const onPop = () => { if (showSaved) setShowSaved(false); };
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
   }, [showSaved]);
@@ -529,6 +533,8 @@ export default function MindScroll() {
                   <X className="ms-saved-x" size={18} onClick={() => toggleSave(c)} />
                   <div className="ms-saved-q">{c.text}</div>
                   {c.author && c.author !== "—" && <div className="ms-saved-a" style={{ color: t.accent }}>— {c.author}</div>}
+                  {c.note && <div className="ms-saved-note">{c.note}</div>}
+                  {c.url && <a className="ms-saved-link" style={{ color: t.accent }} href={c.url} target="_blank" rel="noreferrer noopener">Read more <ArrowUpRight size={12} /></a>}
                 </div>
               );
             })}
