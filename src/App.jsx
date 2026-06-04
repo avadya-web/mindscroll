@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
-import { Flame, Bookmark, BookmarkCheck, Sparkles, X, ArrowUp, Brain, ArrowUpRight } from "lucide-react";
+import { Flame, Bookmark, BookmarkCheck, Sparkles, X, ArrowDown, Brain, ArrowUpRight } from "lucide-react";
 
 /* ================================================================== */
 /*  MINDSCROLL — a live feed that makes you smarter every swipe        */
@@ -230,7 +230,7 @@ export default function MindScroll() {
   const [active, setActive] = useState(0);
   const [saved, setSaved] = useState([]);
   const [showSaved, setShowSaved] = useState(false);
-  const [streak, setStreak] = useState(1);
+  const [streak, setStreak] = useState(null);
   const [today, setToday] = useState(0);
   const [generating, setGenerating] = useState(false);
   const [liveOn, setLiveOn] = useState(false);
@@ -304,6 +304,7 @@ export default function MindScroll() {
   useEffect(() => {
     if (!ready) return;
     counted.current = new Set();
+    cardRefs.current = [];
     busyRef.current = false;
     setLiveOn(false);
     setActive(0);
@@ -358,32 +359,28 @@ export default function MindScroll() {
     setTimeout(() => cardRefs.current[at]?.scrollIntoView({ behavior: "smooth" }), 160);
   };
 
-  /* Claude-generated cards — an extra always-fresh source (needs serverless; see README) */
+  /* Claude-generated cards — requires a /api/generate serverless proxy (see README).
+     Never call the Anthropic API directly from the browser — it exposes your key. */
   const generate = async () => {
     if (generating) return;
     setGenerating(true);
-    const cat = activeCat === "all" ? "philosophy, motivation, AI & technology, science wonder, or mental models" : THEMES[activeCat].name;
     const catKey = activeCat === "all" ? "philosophy" : activeCat;
     try {
-      const res = await fetch("https://api.anthropic.com/v1/messages", {
+      const res = await fetch("/api/generate", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: "claude-sonnet-4-20250514", max_tokens: 1000,
-          messages: [{ role: "user", content: `Generate 5 short, intellectually enriching feed cards in: ${cat}. Each makes the reader smarter. 'text' = a punchy insight under 16 words (only real, accurate quotes — never invent quotes); 'author' = source/thinker or 1-3 word concept label; 'note' = one sharp sentence (max 22 words) on why it matters. Accurate, non-cliché, surprising. Respond ONLY with a JSON array, no markdown: [{"text":"...","author":"...","note":"..."}]` }],
-        }),
+        body: JSON.stringify({ cat: catKey }),
       });
-      const data = await res.json();
-      const raw = (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("");
-      const txt = raw.replace(/```json|```/g, "").trim();
-      const arr = JSON.parse(txt.slice(txt.indexOf("["), txt.lastIndexOf("]") + 1));
+      if (!res.ok) throw new Error(`/api/generate returned ${res.status}`);
+      const arr = await res.json();
       const cards = arr.filter((c) => c.text).map((c) => ({ cat: catKey, text: clean(c.text), author: c.author || "—", note: c.note || "", id: uid(), source: "Claude", live: true }));
       if (cards.length) {
         const at = active + 1;
         setFeed((f) => [...f.slice(0, at), ...cards, ...f.slice(at)]);
         setTimeout(() => cardRefs.current[at]?.scrollIntoView({ behavior: "smooth" }), 120);
       }
-    } catch { /* feed keeps flowing from other sources */ }
-    finally { setGenerating(false); }
+    } catch (err) {
+      console.warn("AI generate unavailable — falling back to live feed.", err);
+    } finally { setGenerating(false); }
   };
 
   const curTheme = THEMES[feed[active]?.cat] || THEMES.philosophy;
@@ -396,7 +393,7 @@ export default function MindScroll() {
         <div className="ms-brand"><Brain size={20} strokeWidth={2.2} /> MindScroll</div>
         <div className="ms-pills">
           {liveOn && <div className="ms-live"><span className="ms-dot" /> LIVE</div>}
-          <div className="ms-pill" title="Day streak"><Flame size={15} color="#F4A24C" /> {streak}</div>
+          {streak !== null && <div className="ms-pill" title="Day streak"><Flame size={15} color="#F4A24C" /> {streak}</div>}
           <div className="ms-pill" onClick={() => setShowSaved(true)} title="Saved"><Bookmark size={15} /> {saved.length}</div>
         </div>
       </div>
@@ -437,7 +434,7 @@ export default function MindScroll() {
                 style={savedNow ? { background: t.accent, borderColor: t.accent, color: "#05060a" } : {}}>
                 {savedNow ? <BookmarkCheck size={22} /> : <Bookmark size={22} />}
               </div>
-              {i === 0 && <div className="ms-hint"><ArrowUp size={18} /> swipe up to get smarter</div>}
+              {i === 0 && <div className="ms-hint"><ArrowDown size={18} /> swipe up to get smarter</div>}
             </div>
           );
         })}
@@ -457,10 +454,10 @@ export default function MindScroll() {
           <div className="ms-ov-list">
             {saved.length === 0 ? (
               <div className="ms-empty">Nothing saved yet.<br />Tap the bookmark on any card<br />to keep ideas worth revisiting.</div>
-            ) : saved.map((c, i) => {
+            ) : saved.map((c) => {
               const t = THEMES[c.cat] || THEMES.philosophy;
               return (
-                <div className="ms-saved-card" key={i} style={{ background: t.bg }}>
+                <div className="ms-saved-card" key={c.text} style={{ background: t.bg }}>
                   <X className="ms-saved-x" size={18} onClick={() => toggleSave(c)} />
                   <div className="ms-saved-q">{c.text}</div>
                   {c.author && c.author !== "—" && <div className="ms-saved-a" style={{ color: t.accent }}>— {c.author}</div>}
