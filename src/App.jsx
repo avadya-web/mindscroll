@@ -252,9 +252,21 @@ const STYLE = `
 .ms-saved-note{font-size:13px;line-height:1.5;color:rgba(244,236,227,.55);margin-top:10px;}
 .ms-saved-link{display:inline-flex;align-items:center;gap:4px;margin-top:10px;font-size:12px;font-weight:700;text-decoration:none;opacity:.75;}
 .ms-saved-x{position:absolute;top:12px;right:12px;cursor:pointer;opacity:.6;padding:6px;margin:-6px;}
+.ms-saved-card{cursor:pointer;transition:transform .15s,box-shadow .15s;}
+.ms-saved-card:active{transform:scale(.97);}
 .ms-empty{text-align:center;color:rgba(244,236,227,.5);font-size:15px;margin-top:60px;line-height:1.6;}
 .ms-close{cursor:pointer;opacity:.8;padding:8px;margin:-8px;}
 .ms-attr{flex-shrink:0;text-align:center;font-size:11.5px;color:rgba(244,236,227,.42);padding:12px 20px calc(20px + env(safe-area-inset-bottom));line-height:1.55;}
+.ms-detail{position:absolute;inset:0;z-index:50;display:flex;flex-direction:column;animation:slideUp .28s cubic-bezier(.2,.7,.2,1);}
+@keyframes slideUp{from{transform:translateY(60px);opacity:0;}to{transform:translateY(0);opacity:1;}}
+.ms-detail-head{flex-shrink:0;display:flex;align-items:center;gap:10px;padding:calc(18px + env(safe-area-inset-top)) 18px 14px;background:rgba(0,0,0,.4);}
+.ms-detail-back{display:flex;align-items:center;gap:6px;font-size:14px;font-weight:700;opacity:.8;cursor:pointer;padding:6px;margin:-6px;}
+.ms-detail-body{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;display:flex;flex-direction:column;justify-content:center;padding:40px 30px calc(60px + env(safe-area-inset-bottom));}
+.ms-detail-tag{font-family:'JetBrains Mono',monospace;font-size:11px;letter-spacing:.28em;text-transform:uppercase;display:flex;align-items:center;gap:9px;margin-bottom:24px;opacity:.8;}
+.ms-detail-q{font-family:'Fraunces',serif;font-weight:500;font-size:clamp(24px,6vw,36px);line-height:1.2;letter-spacing:-.01em;margin:0;}
+.ms-detail-author{font-size:15px;font-weight:600;margin-top:20px;}
+.ms-detail-note{font-size:16px;line-height:1.6;color:rgba(244,236,227,.7);margin-top:20px;}
+.ms-detail-link{display:inline-flex;align-items:center;gap:5px;margin-top:24px;font-size:14px;font-weight:700;text-decoration:none;}
 `;
 
 const todayKey = () => new Date().toISOString().slice(0, 10);
@@ -271,6 +283,7 @@ export default function MindScroll() {
   const [active, setActive] = useState(0);
   const [saved, setSaved] = useState([]);
   const [showSaved, setShowSaved] = useState(false);
+  const [expandedSaved, setExpandedSaved] = useState(null);
   const [streak, setStreak] = useState(null);
   const [today, setToday] = useState(0);
   const [generating, setGenerating] = useState(false);
@@ -415,6 +428,7 @@ export default function MindScroll() {
     // replaceState instead of back() — avoids browser scroll restoration clobbering snap-feed
     if (history.state?.savedOverlay) history.replaceState(null, "");
     setShowSaved(false);
+    setExpandedSaved(null);
   };
   useEffect(() => {
     // Hardware back button / swipe-back: popstate fires, close the overlay
@@ -529,17 +543,44 @@ export default function MindScroll() {
             ) : saved.map((c) => {
               const t = THEMES[c.cat] || THEMES.philosophy;
               return (
-                <div className="ms-saved-card" key={c.text} style={{ background: t.bg }}>
-                  <X className="ms-saved-x" size={18} onClick={() => toggleSave(c)} />
+                <div className="ms-saved-card" key={c.text} style={{ background: t.bg }} onClick={() => setExpandedSaved(c)}>
+                  <X className="ms-saved-x" size={18} onClick={(e) => { e.stopPropagation(); toggleSave(c); }} />
                   <div className="ms-saved-q">{c.text}</div>
                   {c.author && c.author !== "—" && <div className="ms-saved-a" style={{ color: t.accent }}>— {c.author}</div>}
                   {c.note && <div className="ms-saved-note">{c.note}</div>}
-                  {c.url && <a className="ms-saved-link" style={{ color: t.accent }} href={c.url} target="_blank" rel="noreferrer noopener">Read more <ArrowUpRight size={12} /></a>}
                 </div>
               );
             })}
           </div>
           <div className="ms-attr">Live content via ZenQuotes, Hacker News, Wikipedia &amp; uselessfacts.<br />Nuggets you've seen won't repeat.</div>
+
+          {expandedSaved && (() => {
+            const t = THEMES[expandedSaved.cat] || THEMES.philosophy;
+            return (
+              <div className="ms-detail" style={{ background: t.bg }}>
+                <div className="ms-detail-head">
+                  <div className="ms-detail-back" onClick={() => setExpandedSaved(null)}>
+                    <ArrowUpRight size={16} style={{ transform: "rotate(225deg)" }} /> Back
+                  </div>
+                </div>
+                <div className="ms-detail-body">
+                  <div className="ms-detail-tag" style={{ color: t.accent }}>
+                    <span>{t.glyph}</span>{t.name}
+                  </div>
+                  <h2 className="ms-detail-q">{expandedSaved.text}</h2>
+                  {expandedSaved.author && expandedSaved.author !== "—" && (
+                    <div className="ms-detail-author" style={{ color: t.accent }}>— {expandedSaved.author}</div>
+                  )}
+                  {expandedSaved.note && <p className="ms-detail-note">{expandedSaved.note}</p>}
+                  {expandedSaved.url && (
+                    <a className="ms-detail-link" style={{ color: t.accent }} href={expandedSaved.url} target="_blank" rel="noreferrer noopener">
+                      Read more <ArrowUpRight size={15} />
+                    </a>
+                  )}
+                </div>
+              </div>
+            );
+          })()}
         </div>
       )}
     </div>
