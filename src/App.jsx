@@ -13,8 +13,9 @@ const THEMES = {
   tech: { name: "AI & Tech", glyph: "◈", accent: "#3DD6F5", bg: "radial-gradient(125% 100% at 50% 0%, #0c3b40 0%, #07242a 45%, #03141a 100%)" },
   wonder: { name: "Wonder", glyph: "✺", accent: "#7FE8C3", bg: "radial-gradient(125% 100% at 50% 0%, #11315e 0%, #0a1f3f 45%, #050f23 100%)" },
   models: { name: "Mental Models", glyph: "◆", accent: "#C2F24C", bg: "radial-gradient(125% 100% at 50% 0%, #2b3033 0%, #181c1f 45%, #0c0e10 100%)" },
+  word: { name: "Word of the Day", glyph: "Aa", accent: "#D4A8FF", bg: "radial-gradient(125% 100% at 50% 0%, #2d1a4a 0%, #1a0f30 45%, #0d0818 100%)" },
 };
-const CATS = ["all", "philosophy", "motivation", "tech", "wonder", "models"];
+const CATS = ["all", "philosophy", "motivation", "tech", "wonder", "models", "word"];
 
 /* Set to true ONLY after you add the /api/generate serverless function (see README).
    Left false for the no-backend deploy: the bottom button pulls fresh live cards instead. */
@@ -147,11 +148,49 @@ async function srcWonder(n) {
   return out;
 }
 
+/* ====================== WORD OF THE DAY ====================== */
+const WORD_LIST = [
+  "sonder","ephemeral","serendipity","solipsism","ineffable","liminal","palimpsest",
+  "hiraeth","saudade","petrichor","vellichor","anagnorisis","catharsis","eudaimonia",
+  "kairos","apophenia","diegesis","lacuna","meliorism","numinous","oscitancy","quiddity",
+  "redolent","sillage","syzygy","tintinnabulation","umbra","verisimilitude","weltanschauung",
+  "xenial","yugen","zenith","abscond","blandish","crepuscular","diaphanous","enervate",
+  "furtive","garrulous","halcyon","insouciant","jejune","kinetic","loquacious","mendacious",
+  "nebulous","obstreperous","pernicious","querulous","recalcitrant","sycophant","tenacious",
+  "umbrage","vociferous","wistful","zealous","acrimony","bellicose","contrite","dissonance",
+  "equanimity","felicity","gratuitous","hubris","incandescent","juxtapose","labyrinthine",
+];
+
+async function srcWord() {
+  const dayIdx = Math.floor(Date.now() / 86400000) % WORD_LIST.length;
+  const word = WORD_LIST[dayIdx];
+  try {
+    const d = await (await fetch(`https://api.dictionaryapi.dev/api/v2/entries/en/${word}`)).json();
+    const entry = Array.isArray(d) && d[0];
+    if (!entry) throw new Error("no entry");
+    const phonetic = entry.phonetic || entry.phonetics?.find((p) => p.text)?.text || "";
+    const meaning = entry.meanings?.[0];
+    const pos = meaning?.partOfSpeech || "";
+    const def = meaning?.definitions?.[0];
+    const definition = def?.definition || "";
+    const example = def?.example || "";
+    const note = [pos ? `(${pos})` : "", example ? `"${example}"` : ""].filter(Boolean).join(" · ");
+    return [{
+      cat: "word", text: word, author: phonetic || "—",
+      note: definition + (note ? `\n${note}` : ""),
+      source: "Free Dictionary", url: `https://en.wiktionary.org/wiki/${word}`, live: true,
+    }];
+  } catch {
+    return [{ cat: "word", text: word, author: "—", note: "Look this one up — it's worth knowing.", live: true }];
+  }
+}
+
 async function getLiveRaw(cat, n) {
   if (cat === "philosophy" || cat === "motivation") return srcQuotes(cat, n);
   if (cat === "tech") return srcTech(n);
   if (cat === "wonder") return srcWonder(n);
   if (cat === "models") return []; // curated only — no good free API for this
+  if (cat === "word") return srcWord();
   const order = [() => srcQuotes("philosophy", n), () => srcTech(n), () => srcWonder(n), () => srcQuotes("motivation", n)];
   return order[(allRotate++) % order.length]();
 }
@@ -201,19 +240,19 @@ const STYLE = `
 .ms-gen .shine{position:absolute;inset:0;background:linear-gradient(110deg,transparent 30%,rgba(255,255,255,.22) 50%,transparent 70%);transform:translateX(-100%);}
 .ms-gen.busy .shine{animation:shine 1.1s linear infinite;}
 @keyframes shine{to{transform:translateX(100%);}}
-.ms-overlay{position:absolute;inset:0;z-index:40;background:rgba(4,5,9,.74);backdrop-filter:blur(14px);display:flex;flex-direction:column;animation:fade .25s ease;}
+.ms-overlay{position:absolute;inset:0;z-index:40;background:rgba(4,5,9,.92);backdrop-filter:blur(14px);display:flex;flex-direction:column;animation:fade .25s ease;}
 @keyframes fade{from{opacity:0;}to{opacity:1;}}
-.ms-ov-head{display:flex;align-items:center;justify-content:space-between;padding:22px 22px 14px;}
+.ms-ov-head{flex-shrink:0;display:flex;align-items:center;justify-content:space-between;padding:calc(22px + env(safe-area-inset-top)) 22px 14px;background:rgba(4,5,9,.6);backdrop-filter:blur(10px);}
 .ms-ov-title{font-family:'Fraunces',serif;font-size:24px;font-weight:600;}
-.ms-ov-list{flex:1;overflow-y:auto;padding:4px 18px 6px;scrollbar-width:none;}
+.ms-ov-list{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:4px 18px calc(6px + env(safe-area-inset-bottom));scrollbar-width:none;}
 .ms-ov-list::-webkit-scrollbar{display:none;}
 .ms-saved-card{position:relative;border-radius:18px;padding:18px 18px 16px;margin-bottom:12px;border:1px solid rgba(255,255,255,.08);overflow:hidden;}
 .ms-saved-q{font-family:'Fraunces',serif;font-size:18px;line-height:1.25;font-weight:500;}
 .ms-saved-a{font-size:13px;font-weight:600;margin-top:8px;opacity:.8;}
 .ms-saved-x{position:absolute;top:12px;right:12px;cursor:pointer;opacity:.6;}
 .ms-empty{text-align:center;color:rgba(244,236,227,.5);font-size:15px;margin-top:60px;line-height:1.6;}
-.ms-close{cursor:pointer;opacity:.8;}
-.ms-attr{text-align:center;font-size:11.5px;color:rgba(244,236,227,.42);padding:12px 20px 20px;line-height:1.55;}
+.ms-close{cursor:pointer;opacity:.8;padding:8px;margin:-8px;}
+.ms-attr{flex-shrink:0;text-align:center;font-size:11.5px;color:rgba(244,236,227,.42);padding:12px 20px calc(20px + env(safe-area-inset-bottom));line-height:1.55;}
 `;
 
 const todayKey = () => new Date().toISOString().slice(0, 10);
