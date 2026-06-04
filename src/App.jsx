@@ -240,18 +240,27 @@ export default function MindScroll() {
   const cardRefs = useRef([]);
   const counted = useRef(new Set());       // session: which cards counted toward daily total
   const seenRef = useRef(new Set());        // persistent: hashes of live nuggets already shown
+  const seenCurated = useRef(new Set());   // daily: indices of curated cards already served
   const busyRef = useRef(false);            // prevent overlapping live fetches
   const seenTimer = useRef(null);
   const ioRef = useRef(null);
 
   const build = useCallback((cat) => {
     const base = cat === "all" ? LIBRARY : LIBRARY.filter((c) => c.cat === cat);
-    return shuffle(base).map((c) => ({ ...c, id: uid() }));
+    // Serve unseen curated cards first; reset the seen-set when exhausted so it cycles cleanly
+    const unseen = base.filter((_, i) => !seenCurated.current.has(i));
+    const pool = unseen.length > 0 ? unseen : (seenCurated.current.clear(), base);
+    const picked = shuffle(pool);
+    picked.forEach((c) => seenCurated.current.add(base.indexOf(c)));
+    return picked.map((c) => ({ ...c, id: uid() }));
   }, []);
 
   const persistSeen = () => {
     clearTimeout(seenTimer.current);
-    seenTimer.current = setTimeout(() => store.set("seenHashes", [...seenRef.current].slice(-1800)), 700);
+    seenTimer.current = setTimeout(() => {
+      store.set("seenHashes", [...seenRef.current].slice(-1800));
+      store.set("seenCurated", { d: todayKey(), idx: [...seenCurated.current] });
+    }, 700);
   };
 
   /* pull a fresh batch: live first, deduped; pad/fallback with curated so we never dead-end */
@@ -267,8 +276,10 @@ export default function MindScroll() {
         seenRef.current.add(h);
         fresh.push({ ...c, id: uid() });
       }
-      if (fresh.length) { setLiveOn(true); persistSeen(); }
-      const batch = fresh.length >= 3 ? fresh : [...fresh, ...build(cat).slice(0, 5)];
+      if (fresh.length) { setLiveOn(true); }
+      const curated = build(cat).slice(0, 5);
+      persistSeen(); // save both seenHashes and seenCurated
+      const batch = fresh.length >= 3 ? fresh : [...fresh, ...curated];
       setFeed((f) => [...f, ...batch]);
     } catch {
       setFeed((f) => [...f, ...build(cat)]);
@@ -283,6 +294,9 @@ export default function MindScroll() {
       setSaved(await store.get("saved", []));
       const seen = await store.get("seenHashes", []);
       seenRef.current = new Set(seen);
+      // Load daily curated-seen set; reset each new day so content feels fresh
+      const sc = await store.get("seenCurated", { d: "", idx: [] });
+      seenCurated.current = sc.d === todayKey() ? new Set(sc.idx) : new Set();
       const last = await store.get("lastVisit", null);
       const st = await store.get("streak", 0);
       const tk = todayKey();
@@ -351,6 +365,21 @@ export default function MindScroll() {
   };
   const isSaved = (card) => saved.some((c) => c.text === card.text);
 
+  /* Mobile back-button / swipe-back support for the saved overlay */
+  const openSaved = () => {
+    history.pushState({ savedOverlay: true }, "");
+    setShowSaved(true);
+  };
+  const closeSaved = () => {
+    if (history.state?.savedOverlay) history.back();
+    else setShowSaved(false);
+  };
+  useEffect(() => {
+    const onPop = (e) => { if (e.state?.savedOverlay === undefined && showSaved) setShowSaved(false); };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, [showSaved]);
+
   /* No-backend "More" button: pull a fresh live batch and jump to it. */
   const manualMore = async () => {
     if (busyRef.current) return;
@@ -394,7 +423,7 @@ export default function MindScroll() {
         <div className="ms-pills">
           {liveOn && <div className="ms-live"><span className="ms-dot" /> LIVE</div>}
           {streak !== null && <div className="ms-pill" title="Day streak"><Flame size={15} color="#F4A24C" /> {streak}</div>}
-          <div className="ms-pill" onClick={() => setShowSaved(true)} title="Saved"><Bookmark size={15} /> {saved.length}</div>
+          <div className="ms-pill" onClick={openSaved} title="Saved"><Bookmark size={15} /> {saved.length}</div>
         </div>
       </div>
 
@@ -449,7 +478,7 @@ export default function MindScroll() {
         <div className="ms-overlay">
           <div className="ms-ov-head">
             <div className="ms-ov-title">Saved for later</div>
-            <X className="ms-close" size={26} onClick={() => setShowSaved(false)} />
+            <X className="ms-close" size={26} onClick={closeSaved} />
           </div>
           <div className="ms-ov-list">
             {saved.length === 0 ? (
