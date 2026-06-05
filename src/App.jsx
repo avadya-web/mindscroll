@@ -312,13 +312,14 @@ export default function MindScroll() {
   const persistSeen = () => {
     clearTimeout(seenTimer.current);
     seenTimer.current = setTimeout(() => {
-      store.set("seenHashes", [...seenRef.current].slice(-1800));
-      store.set("seenCurated", { d: todayKey(), idx: [...seenCurated.current] });
+      const tk = todayKey();
+      store.set("seenHashes", { d: tk, hashes: [...seenRef.current].slice(-600) });
+      store.set("seenCurated", { d: tk, idx: [...seenCurated.current] });
     }, 700);
   };
 
   /* pull a fresh batch: live first, deduped; pad/fallback with curated so we never dead-end */
-  const appendMore = useCallback(async (cat) => {
+  const appendMore = useCallback(async (cat, prepend = false) => {
     if (busyRef.current) return;
     busyRef.current = true;
     try {
@@ -332,9 +333,10 @@ export default function MindScroll() {
       }
       if (fresh.length) { setLiveOn(true); }
       const curated = build(cat).slice(0, 5);
-      persistSeen(); // save both seenHashes and seenCurated
+      persistSeen();
       const batch = fresh.length >= 3 ? fresh : [...fresh, ...curated];
-      setFeed((f) => [...f, ...batch]);
+      // On first load, put live cards at the top so they're seen immediately
+      setFeed((f) => prepend ? [...batch, ...f] : [...f, ...batch]);
     } catch {
       setFeed((f) => [...f, ...build(cat)]);
     } finally {
@@ -346,11 +348,14 @@ export default function MindScroll() {
   useEffect(() => {
     (async () => {
       setSaved(await store.get("saved", []));
-      const seen = await store.get("seenHashes", []);
-      seenRef.current = new Set(seen);
+      // Reset live-seen hashes daily so fresh API content flows each new day
+      const seenStored = await store.get("seenHashes", { d: "", hashes: [] });
+      const tk0 = todayKey();
+      seenRef.current = (seenStored.d === tk0 && Array.isArray(seenStored.hashes))
+        ? new Set(seenStored.hashes) : new Set();
       // Load daily curated-seen set; reset each new day so content feels fresh
       const sc = await store.get("seenCurated", { d: "", idx: [] });
-      seenCurated.current = sc.d === todayKey() ? new Set(sc.idx) : new Set();
+      seenCurated.current = sc.d === tk0 ? new Set(sc.idx) : new Set();
       const last = await store.get("lastVisit", null);
       const st = await store.get("streak", 0);
       const tk = todayKey();
@@ -376,9 +381,11 @@ export default function MindScroll() {
     busyRef.current = false;
     setLiveOn(false);
     setActive(0);
-    setFeed(build(activeCat).slice(0, 4)); // instant curated seed
     if (feedRef.current) feedRef.current.scrollTo({ top: 0 });
-    appendMore(activeCat);                 // then enrich with live
+    // Show 2 curated cards instantly so there's something to see immediately,
+    // then fetch live — live cards are prepended so they appear first on scroll
+    setFeed(build(activeCat).slice(0, 2));
+    appendMore(activeCat, true); // prepend live so fresh content shows first
   }, [activeCat, ready, build, appendMore]);
 
   /* track active card, reveal animation, daily counter */
@@ -405,7 +412,7 @@ export default function MindScroll() {
 
   /* infinite: fetch more as you near the end */
   useEffect(() => {
-    if (ready && feed.length > 0 && active >= feed.length - 3) appendMore(activeCat);
+    if (ready && feed.length > 0 && active >= feed.length - 3) appendMore(activeCat, false);
   }, [active, feed.length, activeCat, ready, appendMore]);
 
   const toggleSave = (card) => {
@@ -441,7 +448,7 @@ export default function MindScroll() {
   const manualMore = async () => {
     if (busyRef.current) return;
     const at = feed.length;
-    await appendMore(activeCat);
+    await appendMore(activeCat, false);
     setTimeout(() => cardRefs.current[at]?.scrollIntoView({ behavior: "smooth" }), 160);
   };
 
