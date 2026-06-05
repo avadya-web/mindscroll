@@ -2,9 +2,8 @@ import React, { useState, useEffect, useRef, useCallback } from "react";
 import { Flame, Bookmark, BookmarkCheck, Sparkles, X, ArrowDown, Brain, ArrowUpRight, Share2, Download } from "lucide-react";
 
 /* ================================================================== */
-/*  MINDSCROLL — a live feed that makes you smarter every swipe        */
-/*  Live sources: ZenQuotes · Hacker News · Wikipedia · uselessfacts   */
-/*  Curated library is the offline fallback + the Mental Models layer. */
+/*  MINDSCROLL — fresh-first feed. Live cards from /api/feed show       */
+/*  immediately; curated LIBRARY is only a fallback if the fetch fails. */
 /* ================================================================== */
 
 const THEMES = {
@@ -16,12 +15,9 @@ const THEMES = {
   word: { name: "Word of the Day", glyph: "Aa", accent: "#D4A8FF", bg: "radial-gradient(125% 100% at 50% 0%, #2d1a4a 0%, #1a0f30 45%, #0d0818 100%)" },
 };
 const CATS = ["all", "philosophy", "motivation", "tech", "wonder", "models", "word"];
-
-/* Set to true ONLY after you add the /api/generate serverless function (see README).
-   Left false for the no-backend deploy: the bottom button pulls fresh live cards instead. */
 const USE_AI = false;
 
-/* ---- Curated backbone: instant on load, works offline, owns Mental Models ---- */
+/* ---- Curated backbone: fallback if /api/feed fails + Mental Models layer ---- */
 const LIBRARY = [
   { cat: "philosophy", text: "We suffer more in imagination than in reality.", author: "Seneca", note: "Most of what we dread never happens. Name the fear precisely and it usually shrinks." },
   { cat: "philosophy", text: "The unexamined life is not worth living.", author: "Socrates", note: "Question your own defaults. The point isn't to feel bad — it's to choose on purpose." },
@@ -68,96 +64,52 @@ const LIBRARY = [
   { cat: "models", text: "Improve by removing, not just adding.", author: "Via negativa", note: "Often the upgrade is subtraction — a bad habit, a wrong friend. Less, better." },
 ];
 
-/* ====================== LIVE SOURCES ====================== */
-const hashText = (s) => { let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0; return 'h' + (h >>> 0).toString(36); };
-const clean = (s) => (s || '').replace(/[`´]/g, "'").replace(/\s+/g, ' ').trim();
-function shuffle(a) { a = [...a]; for (let i = a.length - 1; i > 0; i--) { const j = (Math.random() * (i + 1)) | 0; [a[i], a[j]] = [a[j], a[i]]; } return a; }
+/* ====================== HELPERS ====================== */
+const clean = (s) => (s || "").replace(/[`´]/g, "'").replace(/\s+/g, " ").trim();
+function shuffle(a) { a = [...a]; for (let i = a.length - 1; i > 0; i--) { const j = (Math.random() * (i + 1)) | 0;[a[i], a[j]] = [a[j], a[i]]; } return a; }
+const todayKey = () => new Date().toISOString().slice(0, 10);
+const uid = (() => { let n = 0; return () => `c${Date.now().toString(36)}_${n++}`; })();
+const VALID_CATS = new Set(["philosophy", "motivation", "tech", "wonder", "models", "word"]);
 
-/*
- * livePool — cards returned by /api/feed, drained one batch at a time.
- * The ONLY external calls the client ever makes are to /api/feed (same origin).
- * All third-party fetches (Reddit, RSS, HN, Quotable, …) happen server-side.
- */
-let livePool = [];
+const store = {
+  async get(k, fb) { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fb; } catch { return fb; } },
+  async set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch { } },
+};
 
-const VALID_CATS = new Set(['philosophy', 'motivation', 'tech', 'wonder', 'models', 'word']);
-
+/* The ONLY external call the client makes is to /api/feed (same origin). */
 async function fetchFreshCards(categories, recentTexts) {
-  const res = await fetch('/api/feed', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      categories,
-      recentlySeen: recentTexts.slice(-60),
-      count: 10,
-    }),
+  const res = await fetch("/api/feed", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ categories, recentlySeen: recentTexts.slice(-60), count: 10 }),
   });
   if (!res.ok) throw new Error(`/api/feed returned ${res.status}`);
   const data = await res.json();
   const cards = (data.cards || [])
     .map((c) => ({
-      // API returns "category"; map to our internal "cat" used for theming
-      cat:    VALID_CATS.has(c.category) ? c.category : 'wonder',
-      text:   clean(c.text || ''),
-      author: c.author    || '—',
-      note:   c.note      || '',
-      url:    c.sourceUrl  || '',
-      source: c.sourceName || 'Live',
+      cat: VALID_CATS.has(c.category) ? c.category : "wonder",
+      text: clean(c.text || ""),
+      author: c.author || "—",
+      note: c.note || "",
+      url: c.sourceUrl || "",
+      source: c.sourceName || "Live",
       live: true,
       id: uid(),
     }))
-    .filter((c) => c.text.length > 5); // drop empty/malformed cards
-  console.log('live cards:', cards.length, '| sample cat:', cards[0]?.cat, '| sample text:', cards[0]?.text?.slice(0, 60));
+    .filter((c) => c.text.length > 5);
+  console.log("live cards:", cards.length, "| sample:", cards[0]?.cat, cards[0]?.text?.slice(0, 50));
   return cards;
 }
 
-/* matchesCat: live cards always have a specific cat; "all" view accepts any */
-const matchesCat = (card, cat) => cat === 'all' || card.cat === cat;
-
-async function getLiveRaw(cat, n, recentTexts) {
-  if (cat === 'word')   return srcWord();
-  if (cat === 'models') return [];
-
-  /* 1 — drain pool for this category (or any category when cat === 'all') */
-  const out = [], rest = [];
-  for (const c of livePool) {
-    if (out.length < n && matchesCat(c, cat)) out.push(c);
-    else rest.push(c);
-  }
-  livePool = rest;
-  if (out.length >= n) return out;
-
-  /* 2 — pool low: fetch from /api/feed */
-  const cats = cat === 'all'
-    ? ['philosophy', 'motivation', 'tech', 'wonder']
-    : [cat];
-  const fresh = await fetchFreshCards(cats, recentTexts); // throws on error → appendMore catches
-  livePool.push(...fresh);
-
-  /* 3 — drain again after refill */
-  const out2 = [], rest2 = [];
-  for (const c of livePool) {
-    if (out2.length < n - out.length && matchesCat(c, cat)) out2.push(c);
-    else rest2.push(c);
-  }
-  livePool = rest2;
-  return [...out, ...out2].slice(0, n);
-}
-
-
 /* ====================== WORD OF THE DAY ====================== */
 const WORD_LIST = [
-  "sonder","ephemeral","serendipity","solipsism","ineffable","liminal","palimpsest",
-  "hiraeth","saudade","petrichor","vellichor","anagnorisis","catharsis","eudaimonia",
-  "kairos","apophenia","diegesis","lacuna","meliorism","numinous","oscitancy","quiddity",
-  "redolent","sillage","syzygy","tintinnabulation","umbra","verisimilitude","weltanschauung",
-  "xenial","yugen","zenith","abscond","blandish","crepuscular","diaphanous","enervate",
-  "furtive","garrulous","halcyon","insouciant","jejune","kinetic","loquacious","mendacious",
-  "nebulous","obstreperous","pernicious","querulous","recalcitrant","sycophant","tenacious",
-  "umbrage","vociferous","wistful","zealous","acrimony","bellicose","contrite","dissonance",
-  "equanimity","felicity","gratuitous","hubris","incandescent","juxtapose","labyrinthine",
+  "sonder", "ephemeral", "serendipity", "solipsism", "ineffable", "liminal", "palimpsest",
+  "hiraeth", "saudade", "petrichor", "vellichor", "anagnorisis", "catharsis", "eudaimonia",
+  "kairos", "apophenia", "diegesis", "lacuna", "meliorism", "numinous", "oscitancy", "quiddity",
+  "redolent", "sillage", "syzygy", "tintinnabulation", "umbra", "verisimilitude", "weltanschauung",
+  "xenial", "yugen", "zenith", "abscond", "blandish", "crepuscular", "diaphanous", "enervate",
+  "furtive", "garrulous", "halcyon", "insouciant", "jejune", "kinetic", "loquacious", "mendacious",
 ];
-
 async function srcWord() {
   const dayIdx = Math.floor(Date.now() / 86400000) % WORD_LIST.length;
   const word = WORD_LIST[dayIdx];
@@ -167,19 +119,23 @@ async function srcWord() {
     if (!entry) throw new Error("no entry");
     const phonetic = entry.phonetic || entry.phonetics?.find((p) => p.text)?.text || "";
     const meaning = entry.meanings?.[0];
-    const pos = meaning?.partOfSpeech || "";
     const def = meaning?.definitions?.[0];
-    const definition = def?.definition || "";
-    const example = def?.example || "";
-    const note = [pos ? `(${pos})` : "", example ? `"${example}"` : ""].filter(Boolean).join(" · ");
-    return [{
-      cat: "word", text: word, author: phonetic || "—",
-      note: definition + (note ? `\n${note}` : ""),
-      source: "Free Dictionary", url: `https://en.wiktionary.org/wiki/${word}`, live: true,
-    }];
+    const note = [meaning?.partOfSpeech ? `(${meaning.partOfSpeech})` : "", def?.example ? `"${def.example}"` : ""].filter(Boolean).join(" · ");
+    return [{ cat: "word", text: word, author: phonetic || "—", note: (def?.definition || "") + (note ? `\n${note}` : ""), source: "Free Dictionary", url: `https://en.wiktionary.org/wiki/${word}`, live: true, id: uid() }];
   } catch {
-    return [{ cat: "word", text: word, author: "—", note: "Look this one up — it's worth knowing.", live: true }];
+    return [{ cat: "word", text: word, author: "—", note: "Look this one up — it's worth knowing.", live: true, id: uid() }];
   }
+}
+
+/* build a curated batch (fallback + models). Avoids repeating until pool exhausts. */
+function buildCurated(cat, seenSet) {
+  const base = cat === "all" ? LIBRARY : LIBRARY.filter((c) => c.cat === cat);
+  if (!base.length) return shuffle(LIBRARY).slice(0, 8).map((c) => ({ ...c, id: uid() }));
+  let unseen = base.filter((c) => !seenSet.has(c.text));
+  if (!unseen.length) { base.forEach((c) => seenSet.delete(c.text)); unseen = base; }
+  const picked = shuffle(unseen);
+  picked.forEach((c) => seenSet.add(c.text));
+  return picked.map((c) => ({ ...c, id: uid() }));
 }
 
 /* ====================== STYLES ====================== */
@@ -194,10 +150,10 @@ const STYLE = `
 .ms-vig{position:absolute;inset:0;pointer-events:none;background:radial-gradient(120% 90% at 50% 35%,transparent 40%,rgba(0,0,0,.45) 100%);}
 .ms-tag{font-family:'JetBrains Mono',monospace;font-size:11px;letter-spacing:.28em;text-transform:uppercase;display:flex;align-items:center;gap:9px;margin-bottom:24px;opacity:0;transform:translateY(14px);}
 .ms-glyph{font-size:15px;}
-.ms-quote{font-family:'Fraunces',serif;font-weight:500;font-size:clamp(25px,6.6vw,39px);line-height:1.18;letter-spacing:-.01em;margin:0;opacity:0;transform:translateY(22px);}
+.ms-quote{font-family:'Fraunces',serif;font-weight:500;font-size:clamp(25px,6.6vw,39px);line-height:1.18;letter-spacing:-.01em;margin:0;opacity:0;transform:translateY(22px);white-space:pre-line;}
 .ms-quote.sm{font-size:clamp(20px,5.2vw,30px);line-height:1.28;}
 .ms-author{font-size:15px;font-weight:600;margin-top:20px;opacity:0;transform:translateY(18px);}
-.ms-note{font-size:15px;line-height:1.5;color:rgba(244,236,227,.62);margin-top:16px;max-width:34ch;opacity:0;transform:translateY(18px);}
+.ms-note{font-size:15px;line-height:1.5;color:rgba(244,236,227,.62);margin-top:16px;max-width:34ch;opacity:0;transform:translateY(18px);white-space:pre-line;}
 .ms-src{display:inline-flex;align-items:center;gap:5px;margin-top:18px;font-size:13px;font-weight:700;text-decoration:none;opacity:0;transform:translateY(14px);width:fit-content;}
 .ms-card.in .ms-tag{animation:rise .55s .05s cubic-bezier(.2,.7,.2,1) forwards;}
 .ms-card.in .ms-quote{animation:rise .7s .12s cubic-bezier(.2,.7,.2,1) forwards;}
@@ -205,12 +161,15 @@ const STYLE = `
 .ms-card.in .ms-note{animation:rise .6s .33s cubic-bezier(.2,.7,.2,1) forwards;}
 .ms-card.in .ms-src{animation:rise .6s .4s cubic-bezier(.2,.7,.2,1) forwards;}
 @keyframes rise{to{opacity:1;transform:translateY(0);}}
+.ms-loading{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px;color:rgba(244,236,227,.6);font-size:15px;}
+.ms-spin{width:34px;height:34px;border-radius:50%;border:3px solid rgba(255,255,255,.15);border-top-color:#F4ECE3;animation:spin .8s linear infinite;}
+@keyframes spin{to{transform:rotate(360deg);}}
 .ms-actions{position:absolute;right:24px;bottom:calc(118px + env(safe-area-inset-bottom));display:flex;flex-direction:column;gap:12px;}
 .ms-save,.ms-share{width:54px;height:54px;border-radius:50%;border:1px solid rgba(255,255,255,.16);background:rgba(255,255,255,.06);backdrop-filter:blur(10px);display:flex;align-items:center;justify-content:center;cursor:pointer;transition:transform .18s,background .2s;color:#F4ECE3;}
 .ms-save:active,.ms-share:active{transform:scale(.86);}
 .ms-toast{position:absolute;bottom:calc(110px + env(safe-area-inset-bottom));left:50%;transform:translateX(-50%) translateY(10px);background:rgba(255,255,255,.12);backdrop-filter:blur(12px);border:1px solid rgba(255,255,255,.18);border-radius:999px;padding:9px 18px;font-size:13px;font-weight:700;white-space:nowrap;pointer-events:none;opacity:0;transition:opacity .2s,transform .2s;z-index:30;}
 .ms-toast.show{opacity:1;transform:translateX(-50%) translateY(0);}
-.ms-install{position:fixed;bottom:0;left:50%;transform:translateX(-50%);width:100%;max-width:520px;z-index:60;padding:16px 20px calc(16px + env(safe-area-inset-bottom));background:rgba(10,10,20,.96);backdrop-filter:blur(16px);border-top:1px solid rgba(255,255,255,.1);display:flex;align-items:center;gap:14px;animation:slideUp .3s cubic-bezier(.2,.7,.2,1);}
+.ms-install{position:fixed;bottom:0;left:50%;transform:translateX(-50%);width:100%;max-width:520px;z-index:60;padding:16px 20px calc(16px + env(safe-area-inset-bottom));background:rgba(10,10,20,.96);backdrop-filter:blur(16px);border-top:1px solid rgba(255,255,255,.1);display:flex;align-items:center;gap:14px;}
 .ms-install-icon{width:48px;height:48px;border-radius:12px;background:#05060a;border:1px solid rgba(255,255,255,.12);display:flex;align-items:center;justify-content:center;flex-shrink:0;}
 .ms-install-text{flex:1;}
 .ms-install-title{font-weight:700;font-size:15px;}
@@ -237,46 +196,25 @@ const STYLE = `
 .ms-gen .shine{position:absolute;inset:0;background:linear-gradient(110deg,transparent 30%,rgba(255,255,255,.22) 50%,transparent 70%);transform:translateX(-100%);}
 .ms-gen.busy .shine{animation:shine 1.1s linear infinite;}
 @keyframes shine{to{transform:translateX(100%);}}
-.ms-overlay{position:absolute;inset:0;z-index:40;background:rgba(4,5,9,.92);backdrop-filter:blur(14px);display:flex;flex-direction:column;animation:fade .25s ease;}
-@keyframes fade{from{opacity:0;}to{opacity:1;}}
-.ms-ov-head{flex-shrink:0;display:flex;align-items:center;justify-content:space-between;padding:calc(22px + env(safe-area-inset-top)) 22px 14px;background:rgba(4,5,9,.6);backdrop-filter:blur(10px);}
+.ms-overlay{position:absolute;inset:0;z-index:40;background:rgba(4,5,9,.92);backdrop-filter:blur(14px);display:flex;flex-direction:column;}
+.ms-ov-head{flex-shrink:0;display:flex;align-items:center;justify-content:space-between;padding:calc(22px + env(safe-area-inset-top)) 22px 14px;}
 .ms-ov-title{font-family:'Fraunces',serif;font-size:24px;font-weight:600;}
 .ms-ov-list{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:4px 18px calc(6px + env(safe-area-inset-bottom));scrollbar-width:none;}
 .ms-ov-list::-webkit-scrollbar{display:none;}
-.ms-saved-card{position:relative;border-radius:18px;padding:18px 48px 16px 18px;margin-bottom:12px;border:1px solid rgba(255,255,255,.08);overflow:hidden;}
+.ms-saved-card{position:relative;border-radius:18px;padding:18px 48px 16px 18px;margin-bottom:12px;border:1px solid rgba(255,255,255,.08);overflow:hidden;cursor:pointer;}
 .ms-saved-q{font-family:'Fraunces',serif;font-size:18px;line-height:1.25;font-weight:500;}
 .ms-saved-a{font-size:13px;font-weight:600;margin-top:8px;opacity:.8;}
 .ms-saved-note{font-size:13px;line-height:1.5;color:rgba(244,236,227,.55);margin-top:10px;}
-.ms-saved-link{display:inline-flex;align-items:center;gap:4px;margin-top:10px;font-size:12px;font-weight:700;text-decoration:none;opacity:.75;}
 .ms-saved-x{position:absolute;top:12px;right:12px;cursor:pointer;opacity:.6;padding:6px;margin:-6px;}
-.ms-saved-card{cursor:pointer;transition:transform .15s,box-shadow .15s;}
-.ms-saved-card:active{transform:scale(.97);}
 .ms-empty{text-align:center;color:rgba(244,236,227,.5);font-size:15px;margin-top:60px;line-height:1.6;}
 .ms-close{cursor:pointer;opacity:.8;padding:8px;margin:-8px;}
 .ms-attr{flex-shrink:0;text-align:center;font-size:11.5px;color:rgba(244,236,227,.42);padding:12px 20px calc(20px + env(safe-area-inset-bottom));line-height:1.55;}
-.ms-detail{position:absolute;inset:0;z-index:50;display:flex;flex-direction:column;animation:slideUp .28s cubic-bezier(.2,.7,.2,1);}
-@keyframes slideUp{from{transform:translateY(60px);opacity:0;}to{transform:translateY(0);opacity:1;}}
-.ms-detail-head{flex-shrink:0;display:flex;align-items:center;gap:10px;padding:calc(18px + env(safe-area-inset-top)) 18px 14px;background:rgba(0,0,0,.4);}
-.ms-detail-back{display:flex;align-items:center;gap:6px;font-size:14px;font-weight:700;opacity:.8;cursor:pointer;padding:6px;margin:-6px;}
-.ms-detail-body{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;display:flex;flex-direction:column;justify-content:center;padding:40px 30px calc(60px + env(safe-area-inset-bottom));}
-.ms-detail-tag{font-family:'JetBrains Mono',monospace;font-size:11px;letter-spacing:.28em;text-transform:uppercase;display:flex;align-items:center;gap:9px;margin-bottom:24px;opacity:.8;}
-.ms-detail-q{font-family:'Fraunces',serif;font-weight:500;font-size:clamp(24px,6vw,36px);line-height:1.2;letter-spacing:-.01em;margin:0;}
-.ms-detail-author{font-size:15px;font-weight:600;margin-top:20px;}
-.ms-detail-note{font-size:16px;line-height:1.6;color:rgba(244,236,227,.7);margin-top:20px;}
-.ms-detail-link{display:inline-flex;align-items:center;gap:5px;margin-top:24px;font-size:14px;font-weight:700;text-decoration:none;}
 `;
-
-const todayKey = () => new Date().toISOString().slice(0, 10);
-const uid = (() => { let n = 0; return () => `c${Date.now().toString(36)}_${n++}`; })();
-// Real-app storage: persists streak, saved cards, and the seen-set in the browser.
-const store = {
-  async get(k, fb) { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fb; } catch { return fb; } },
-  async set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch { } },
-};
 
 export default function MindScroll() {
   const [activeCat, setActiveCat] = useState("all");
   const [feed, setFeed] = useState([]);
+  const [loading, setLoading] = useState(true);
   const [active, setActive] = useState(0);
   const [saved, setSaved] = useState([]);
   const [showSaved, setShowSaved] = useState(false);
@@ -289,79 +227,60 @@ export default function MindScroll() {
   const [toast, setToast] = useState("");
   const [installPrompt, setInstallPrompt] = useState(null);
   const [showInstall, setShowInstall] = useState(false);
-  const toastTimer = useRef(null);
 
   const feedRef = useRef(null);
   const cardRefs = useRef([]);
-  const counted = useRef(new Set());        // session: which cards counted toward daily total
-  const seenRef = useRef(new Set());        // persistent: hashes — dedup gate
-  const recentTexts = useRef([]);           // persistent: raw texts sent to Claude to avoid repeats
-  const seenCurated = useRef(new Set());    // daily: curated card texts already served
-  const busyRef = useRef(false);            // prevent overlapping live fetches
-  const seenTimer = useRef(null);
+  const counted = useRef(new Set());
+  const recentTexts = useRef([]);        // texts sent to /api/feed so Claude avoids repeats
+  const seenCurated = useRef(new Set());  // curated fallback dedup
+  const busyRef = useRef(false);
+  const toastTimer = useRef(null);
   const ioRef = useRef(null);
 
-  const build = useCallback((cat) => {
-    const base = cat === "all" ? LIBRARY : LIBRARY.filter((c) => c.cat === cat);
-    // Use card text as the stable key — category-relative indices collide across views
-    const unseen = base.filter((c) => !seenCurated.current.has(c.text));
-    const pool = unseen.length > 0 ? unseen : (() => { seenCurated.current.clear(); return base; })();
-    const picked = shuffle(pool);
-    picked.forEach((c) => seenCurated.current.add(c.text));
-    return picked.map((c) => ({ ...c, id: uid() }));
-  }, []);
-
-  const persistSeen = () => {
-    clearTimeout(seenTimer.current);
-    seenTimer.current = setTimeout(() => {
-      store.set("seenHashes", [...seenRef.current].slice(-5000));
-      store.set("seenCurated", { d: todayKey(), keys: [...seenCurated.current] });
-      store.set("recentTexts", recentTexts.current.slice(-80));
-    }, 700);
+  const recordSeen = (cards) => {
+    cards.forEach((c) => recentTexts.current.push(c.text.slice(0, 120)));
+    if (recentTexts.current.length > 80) recentTexts.current = recentTexts.current.slice(-80);
+    store.set("recentTexts", recentTexts.current);
   };
 
-  /* pull a fresh batch: live first, deduped; pad/fallback with curated so we never dead-end */
-  const appendMore = useCallback(async (cat, prepend = false) => {
+  /* THE CORE: load a batch and put it straight into the rendered feed.
+     append=false replaces the feed (fresh-first on open / category switch). */
+  const loadFeed = useCallback(async (cat, append) => {
     if (busyRef.current) return;
     busyRef.current = true;
+    if (!append) setLoading(true);
     try {
-      const raw = await getLiveRaw(cat, 8, recentTexts.current);
-      const fresh = [];
-      for (const c of raw) {
-        const h = hashText(c.text);
-        // Only skip exact duplicates within this session, not across all historical sessions
-        if (fresh.some((f) => hashText(f.text) === h)) continue;
-        seenRef.current.add(h);
-        recentTexts.current.push(c.text.slice(0, 120));
-        if (recentTexts.current.length > 80) recentTexts.current.shift();
-        fresh.push({ ...c, id: c.id || uid() });
+      let cards;
+      if (cat === "word") {
+        cards = await srcWord();
+      } else if (cat === "models") {
+        cards = buildCurated("models", seenCurated.current);
+      } else {
+        const cats = cat === "all" ? ["philosophy", "motivation", "tech", "wonder"] : [cat];
+        cards = await fetchFreshCards(cats, recentTexts.current); // throws → curated fallback
       }
-      if (fresh.length) { setLiveOn(true); }
-      persistSeen();
-      const batch = fresh.length > 0 ? fresh : build(cat).slice(0, 5);
-      // On first load, put live cards at the top so they're seen immediately
-      setFeed((f) => prepend ? [...batch, ...f] : [...f, ...batch]);
-    } catch {
-      setFeed((f) => [...f, ...build(cat)]);
+      if (cards.length) {
+        setLiveOn(cat !== "models");
+        recordSeen(cards);
+      }
+      const safe = cards.length ? cards : buildCurated(cat, seenCurated.current);
+      setFeed((f) => (append ? [...f, ...safe] : safe));
+    } catch (e) {
+      console.warn("feed load failed → curated fallback:", e);
+      const fallback = buildCurated(cat, seenCurated.current);
+      setFeed((f) => (append ? [...f, ...fallback] : fallback));
     } finally {
+      setLoading(false);
       busyRef.current = false;
     }
-  }, [build]);
+  }, []);
 
-  /* boot: storage + streak + seen-set */
+  /* boot: load storage + streak */
   useEffect(() => {
     (async () => {
       setSaved(await store.get("saved", []));
-      // seenHashes: permanent — hash-based dedup gate
-      const seenStored = await store.get("seenHashes", []);
-      seenRef.current = new Set(Array.isArray(seenStored) ? seenStored : []);
-      // recentTexts: raw texts sent to Claude so it avoids repeats (capped at 80)
       const rt = await store.get("recentTexts", []);
       recentTexts.current = Array.isArray(rt) ? rt : [];
-      // seenCurated: resets when all 40 curated cards are exhausted (handled in build())
-      const sc = await store.get("seenCurated", { d: "", keys: [] });
-      const tk0 = todayKey();
-      seenCurated.current = sc.d === tk0 ? new Set(sc.keys) : new Set();
       const last = await store.get("lastVisit", null);
       const st = await store.get("streak", 0);
       const tk = todayKey();
@@ -379,7 +298,7 @@ export default function MindScroll() {
     })();
   }, []);
 
-  /* (re)build feed on boot + category change */
+  /* (re)load on boot + category change — fresh content leads */
   useEffect(() => {
     if (!ready) return;
     counted.current = new Set();
@@ -387,29 +306,23 @@ export default function MindScroll() {
     busyRef.current = false;
     setLiveOn(false);
     setActive(0);
+    setFeed([]);
     if (feedRef.current) feedRef.current.scrollTo({ top: 0 });
-    // Seed with 8 curated cards immediately — user can scroll while live loads
-    setFeed(build(activeCat).slice(0, 8));
-    appendMore(activeCat, false); // append live cards after the seed
-  }, [activeCat, ready, build, appendMore]);
+    loadFeed(activeCat, false);
+  }, [activeCat, ready, loadFeed]);
 
-  /* track active card, reveal animation, daily counter */
+  /* track active card + reveal animation + daily counter */
   useEffect(() => {
     if (ioRef.current) ioRef.current.disconnect();
     const io = new IntersectionObserver((entries) => {
       entries.forEach((e) => {
-        const idx = Number(e.target.dataset.idx);
         if (e.isIntersecting && e.intersectionRatio > 0.55) {
           e.target.classList.add("in");
+          const idx = Number(e.target.dataset.idx);
           setActive(idx);
           const card = feed[idx];
           if (card && !counted.current.has(card.id)) {
             counted.current.add(card.id);
-            // Record shown text so Claude avoids it next fetch
-            if (card.text && !recentTexts.current.includes(card.text.slice(0, 120))) {
-              recentTexts.current.push(card.text.slice(0, 120));
-              if (recentTexts.current.length > 80) recentTexts.current.shift();
-            }
             setToday((t) => { const nv = t + 1; store.set("todayCount", { d: todayKey(), n: nv }); return nv; });
           }
         }
@@ -420,10 +333,12 @@ export default function MindScroll() {
     return () => io.disconnect();
   }, [feed]);
 
-  /* infinite: fetch more as you near the end */
+  /* infinite: fetch more as you near the end (not for single-card 'word') */
   useEffect(() => {
-    if (ready && feed.length > 0 && active >= feed.length - 3) appendMore(activeCat, false);
-  }, [active, feed.length, activeCat, ready, appendMore]);
+    if (ready && !loading && feed.length > 0 && activeCat !== "word" && active >= feed.length - 3) {
+      loadFeed(activeCat, true);
+    }
+  }, [active, feed.length, activeCat, ready, loading, loadFeed]);
 
   const toggleSave = (card) => {
     setSaved((prev) => {
@@ -436,31 +351,19 @@ export default function MindScroll() {
   };
   const isSaved = (card) => saved.some((c) => c.text === card.text);
 
-  const showToast = (msg) => {
-    setToast(msg);
-    clearTimeout(toastTimer.current);
-    toastTimer.current = setTimeout(() => setToast(""), 2200);
-  };
+  const showToast = (msg) => { setToast(msg); clearTimeout(toastTimer.current); toastTimer.current = setTimeout(() => setToast(""), 2200); };
 
   const shareCard = async (card) => {
     const text = `"${card.text}"${card.author && card.author !== "—" ? `\n— ${card.author}` : ""}`;
-    const shareData = { title: "MindScroll", text, url: card.url || "https://mindscroll.app" };
+    const shareData = { title: "MindScroll", text, url: card.url || "" };
     try {
-      if (navigator.share && navigator.canShare?.(shareData)) {
-        await navigator.share(shareData);
-      } else {
-        await navigator.clipboard.writeText(`${text}\n\nvia MindScroll`);
-        showToast("Copied to clipboard ✓");
-      }
+      if (navigator.share && navigator.canShare?.(shareData)) await navigator.share(shareData);
+      else { await navigator.clipboard.writeText(`${text}\n\nvia MindScroll`); showToast("Copied to clipboard ✓"); }
     } catch (e) {
-      if (e.name !== "AbortError") {
-        await navigator.clipboard.writeText(`${text}\n\nvia MindScroll`).catch(() => {});
-        showToast("Copied to clipboard ✓");
-      }
+      if (e.name !== "AbortError") { await navigator.clipboard.writeText(`${text}\n\nvia MindScroll`).catch(() => {}); showToast("Copied to clipboard ✓"); }
     }
   };
 
-  /* Capture the install prompt so we can show it at the right moment */
   useEffect(() => {
     const handler = (e) => { e.preventDefault(); setInstallPrompt(e); setShowInstall(true); };
     window.addEventListener("beforeinstallprompt", handler);
@@ -471,59 +374,28 @@ export default function MindScroll() {
     if (!installPrompt) return;
     installPrompt.prompt();
     const { outcome } = await installPrompt.userChoice;
-    setInstallPrompt(null);
-    setShowInstall(false);
+    setInstallPrompt(null); setShowInstall(false);
     if (outcome === "accepted") showToast("MindScroll installed 🎉");
   };
 
-  /* Mobile back-button / swipe-back support for the saved overlay */
-  const openSaved = () => {
-    history.pushState({ savedOverlay: true }, "");
-    setShowSaved(true);
-  };
-  const closeSaved = () => {
-    // replaceState instead of back() — avoids browser scroll restoration clobbering snap-feed
-    if (history.state?.savedOverlay) history.replaceState(null, "");
-    setShowSaved(false);
-    setExpandedSaved(null);
-  };
-  useEffect(() => {
-    // Hardware back button / swipe-back: popstate fires, close the overlay
-    const onPop = () => { if (showSaved) setShowSaved(false); };
-    window.addEventListener("popstate", onPop);
-    return () => window.removeEventListener("popstate", onPop);
-  }, [showSaved]);
-
-  /* No-backend "More" button: pull a fresh live batch and jump to it. */
   const manualMore = async () => {
-    if (busyRef.current) return;
     const at = feed.length;
-    await appendMore(activeCat, false);
+    await loadFeed(activeCat, true);
     setTimeout(() => cardRefs.current[at]?.scrollIntoView({ behavior: "smooth" }), 160);
   };
 
-  /* Claude-generated cards — requires a /api/generate serverless proxy (see README).
-     Never call the Anthropic API directly from the browser — it exposes your key. */
   const generate = async () => {
     if (generating) return;
     setGenerating(true);
     const catKey = activeCat === "all" ? "philosophy" : activeCat;
     try {
-      const res = await fetch("/api/generate", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ cat: catKey }),
-      });
-      if (!res.ok) throw new Error(`/api/generate returned ${res.status}`);
+      const res = await fetch("/api/generate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ cat: catKey }) });
+      if (!res.ok) throw new Error(`/api/generate ${res.status}`);
       const arr = await res.json();
       const cards = arr.filter((c) => c.text).map((c) => ({ cat: catKey, text: clean(c.text), author: c.author || "—", note: c.note || "", id: uid(), source: "Claude", live: true }));
-      if (cards.length) {
-        const at = active + 1;
-        setFeed((f) => [...f.slice(0, at), ...cards, ...f.slice(at)]);
-        setTimeout(() => cardRefs.current[at]?.scrollIntoView({ behavior: "smooth" }), 120);
-      }
-    } catch (err) {
-      console.warn("AI generate unavailable — falling back to live feed.", err);
-    } finally { setGenerating(false); }
+      if (cards.length) { const at = active + 1; setFeed((f) => [...f.slice(0, at), ...cards, ...f.slice(at)]); setTimeout(() => cardRefs.current[at]?.scrollIntoView({ behavior: "smooth" }), 120); }
+    } catch (err) { console.warn("AI generate unavailable:", err); }
+    finally { setGenerating(false); }
   };
 
   const curTheme = THEMES[feed[active]?.cat] || THEMES.philosophy;
@@ -537,7 +409,7 @@ export default function MindScroll() {
         <div className="ms-pills">
           {liveOn && <div className="ms-live"><span className="ms-dot" /> LIVE</div>}
           {streak !== null && <div className="ms-pill" title="Day streak"><Flame size={15} color="#F4A24C" /> {streak}</div>}
-          <div className="ms-pill" onClick={openSaved} title="Saved"><Bookmark size={15} /> {saved.length}</div>
+          <div className="ms-pill" onClick={() => setShowSaved(true)} title="Saved"><Bookmark size={15} /> {saved.length}</div>
         </div>
       </div>
 
@@ -554,40 +426,42 @@ export default function MindScroll() {
         })}
       </div>
 
-      <div className="ms-feed" ref={feedRef}>
-        {feed.map((card, i) => {
-          const t = THEMES[card.cat] || THEMES.philosophy;
-          const savedNow = isSaved(card);
-          const long = card.text.length > 95;
-          return (
-            <div key={card.id} data-idx={i} ref={(el) => (cardRefs.current[i] = el)} className="ms-card" style={{ background: t.bg }}>
-              <div className="ms-grain" /><div className="ms-vig" />
-              <div className="ms-tag" style={{ color: t.accent }}>
-                <span className="ms-glyph">{t.glyph}</span>{t.name}{card.live ? " · live" : ""}
-              </div>
-              <h1 className={`ms-quote ${long ? "sm" : ""}`}>{card.text}</h1>
-              {card.author && card.author !== "—" && <div className="ms-author" style={{ color: t.accent }}>— {card.author}</div>}
-              {card.note && <p className="ms-note">{card.note}</p>}
-              {(card.url || card.source) && (
-                <a className="ms-src" style={{ color: t.accent }} href={card.url || "https://zenquotes.io"} target="_blank" rel="noreferrer noopener" onClick={(e) => e.stopPropagation()}>
-                  {card.url && card.source === "the source" ? "Read the source" : card.url ? `Read on ${card.source}` : `via ${card.source}`} <ArrowUpRight size={14} />
-                </a>
-              )}
-              <div className="ms-actions">
-                <div className={`ms-save ${savedNow ? "on" : ""}`} onClick={() => toggleSave(card)}
-                  style={savedNow ? { background: t.accent, borderColor: t.accent, color: "#05060a" } : {}}>
-                  {savedNow ? <BookmarkCheck size={22} /> : <Bookmark size={22} />}
+      {loading && feed.length === 0 ? (
+        <div className="ms-loading"><div className="ms-spin" /><div>Finding fresh ideas…</div></div>
+      ) : (
+        <div className="ms-feed" ref={feedRef}>
+          {feed.map((card, i) => {
+            const t = THEMES[card.cat] || THEMES.philosophy;
+            const savedNow = isSaved(card);
+            const long = card.text.length > 95;
+            return (
+              <div key={card.id} data-idx={i} ref={(el) => (cardRefs.current[i] = el)} className="ms-card" style={{ background: t.bg }}>
+                <div className="ms-grain" /><div className="ms-vig" />
+                <div className="ms-tag" style={{ color: t.accent }}>
+                  <span className="ms-glyph">{t.glyph}</span>{t.name}{card.live ? " · live" : ""}
                 </div>
-                <div className="ms-share" onClick={() => shareCard(card)}>
-                  <Share2 size={20} />
+                <h1 className={`ms-quote ${long ? "sm" : ""}`}>{card.text}</h1>
+                {card.author && card.author !== "—" && <div className="ms-author" style={{ color: t.accent }}>— {card.author}</div>}
+                {card.note && <p className="ms-note">{card.note}</p>}
+                {card.url && (
+                  <a className="ms-src" style={{ color: t.accent }} href={card.url} target="_blank" rel="noreferrer noopener" onClick={(e) => e.stopPropagation()}>
+                    Read more <ArrowUpRight size={14} />
+                  </a>
+                )}
+                <div className="ms-actions">
+                  <div className={`ms-save ${savedNow ? "on" : ""}`} onClick={() => toggleSave(card)}
+                    style={savedNow ? { background: t.accent, borderColor: t.accent, color: "#05060a" } : {}}>
+                    {savedNow ? <BookmarkCheck size={22} /> : <Bookmark size={22} />}
+                  </div>
+                  <div className="ms-share" onClick={() => shareCard(card)}><Share2 size={20} /></div>
                 </div>
+                <div className={`ms-toast ${toast ? "show" : ""}`}>{toast}</div>
+                {i === 0 && <div className="ms-hint"><ArrowDown size={18} /> swipe up to get smarter</div>}
               </div>
-              <div className={`ms-toast ${toast ? "show" : ""}`}>{toast}</div>
-              {i === 0 && <div className="ms-hint"><ArrowDown size={18} /> swipe up to get smarter</div>}
-            </div>
-          );
-        })}
-      </div>
+            );
+          })}
+        </div>
+      )}
 
       <div className={`ms-gen ${generating ? "busy" : ""}`} onClick={USE_AI ? generate : manualMore} style={{ borderColor: curTheme.accent + "55" }}>
         <span className="shine" /><Sparkles size={16} color={curTheme.accent} />
@@ -612,7 +486,7 @@ export default function MindScroll() {
         <div className="ms-overlay">
           <div className="ms-ov-head">
             <div className="ms-ov-title">Saved for later</div>
-            <X className="ms-close" size={26} onClick={closeSaved} />
+            <X className="ms-close" size={26} onClick={() => { setShowSaved(false); setExpandedSaved(null); }} />
           </div>
           <div className="ms-ov-list">
             {saved.length === 0 ? (
@@ -629,35 +503,7 @@ export default function MindScroll() {
               );
             })}
           </div>
-          <div className="ms-attr">Live content via ZenQuotes, Hacker News, Wikipedia &amp; uselessfacts.<br />Nuggets you've seen won't repeat.</div>
-
-          {expandedSaved && (() => {
-            const t = THEMES[expandedSaved.cat] || THEMES.philosophy;
-            return (
-              <div className="ms-detail" style={{ background: t.bg }}>
-                <div className="ms-detail-head">
-                  <div className="ms-detail-back" onClick={() => setExpandedSaved(null)}>
-                    <ArrowUpRight size={16} style={{ transform: "rotate(225deg)" }} /> Back
-                  </div>
-                </div>
-                <div className="ms-detail-body">
-                  <div className="ms-detail-tag" style={{ color: t.accent }}>
-                    <span>{t.glyph}</span>{t.name}
-                  </div>
-                  <h2 className="ms-detail-q">{expandedSaved.text}</h2>
-                  {expandedSaved.author && expandedSaved.author !== "—" && (
-                    <div className="ms-detail-author" style={{ color: t.accent }}>— {expandedSaved.author}</div>
-                  )}
-                  {expandedSaved.note && <p className="ms-detail-note">{expandedSaved.note}</p>}
-                  {expandedSaved.url && (
-                    <a className="ms-detail-link" style={{ color: t.accent }} href={expandedSaved.url} target="_blank" rel="noreferrer noopener">
-                      Read more <ArrowUpRight size={15} />
-                    </a>
-                  )}
-                </div>
-              </div>
-            );
-          })()}
+          <div className="ms-attr">Fresh content generated live · Nuggets you've seen won't repeat.</div>
         </div>
       )}
     </div>
