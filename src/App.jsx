@@ -301,11 +301,11 @@ export default function MindScroll() {
 
   const build = useCallback((cat) => {
     const base = cat === "all" ? LIBRARY : LIBRARY.filter((c) => c.cat === cat);
-    // Serve unseen curated cards first; reset the seen-set when exhausted so it cycles cleanly
-    const unseen = base.filter((_, i) => !seenCurated.current.has(i));
-    const pool = unseen.length > 0 ? unseen : (seenCurated.current.clear(), base);
+    // Use card text as the stable key — category-relative indices collide across views
+    const unseen = base.filter((c) => !seenCurated.current.has(c.text));
+    const pool = unseen.length > 0 ? unseen : (() => { seenCurated.current.clear(); return base; })();
     const picked = shuffle(pool);
-    picked.forEach((c) => seenCurated.current.add(base.indexOf(c)));
+    picked.forEach((c) => seenCurated.current.add(c.text));
     return picked.map((c) => ({ ...c, id: uid() }));
   }, []);
 
@@ -314,7 +314,7 @@ export default function MindScroll() {
     seenTimer.current = setTimeout(() => {
       const tk = todayKey();
       store.set("seenHashes", { d: tk, hashes: [...seenRef.current].slice(-600) });
-      store.set("seenCurated", { d: tk, idx: [...seenCurated.current] });
+      store.set("seenCurated", { d: tk, keys: [...seenCurated.current] });
     }, 700);
   };
 
@@ -354,8 +354,8 @@ export default function MindScroll() {
       seenRef.current = (seenStored.d === tk0 && Array.isArray(seenStored.hashes))
         ? new Set(seenStored.hashes) : new Set();
       // Load daily curated-seen set; reset each new day so content feels fresh
-      const sc = await store.get("seenCurated", { d: "", idx: [] });
-      seenCurated.current = sc.d === tk0 ? new Set(sc.idx) : new Set();
+      const sc = await store.get("seenCurated", { d: "", keys: [] });
+      seenCurated.current = sc.d === tk0 ? new Set(sc.keys) : new Set();
       const last = await store.get("lastVisit", null);
       const st = await store.get("streak", 0);
       const tk = todayKey();
