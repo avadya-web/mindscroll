@@ -400,10 +400,9 @@ export default function MindScroll() {
     setLiveOn(false);
     setActive(0);
     if (feedRef.current) feedRef.current.scrollTo({ top: 0 });
-    // Show 2 curated cards instantly so there's something to see immediately,
-    // then fetch live — live cards are prepended so they appear first on scroll
-    setFeed(build(activeCat).slice(0, 2));
-    appendMore(activeCat, true); // prepend live so fresh content shows first
+    // Seed with 8 curated cards immediately — user can scroll while live loads
+    setFeed(build(activeCat).slice(0, 8));
+    appendMore(activeCat, false); // append live cards after the seed
   }, [activeCat, ready, build, appendMore]);
 
   /* track active card, reveal animation, daily counter */

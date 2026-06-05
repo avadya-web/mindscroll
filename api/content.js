@@ -138,7 +138,7 @@ function shuffle(a) {
   return a;
 }
 
-export default async function handler(req, res) {
+module.exports = async function handler(req, res) {
   const cat = req.query?.cat || 'all';
 
   // Cache at the edge for 10 minutes
