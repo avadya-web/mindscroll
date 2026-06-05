@@ -9,7 +9,7 @@
  *  3. Return cards — client never touches Reddit or Anthropic directly
  */
 
-const Anthropic = require("@anthropic-ai/sdk");
+import Anthropic from "@anthropic-ai/sdk";
 
 /* ═══════════════════════════════════════════════════════════
    RSS SOURCES — one or two per category, all reputable feeds
@@ -168,7 +168,7 @@ async function fetchReddit(category, token) {
 /* ════════════════════════════════════════════════════════
    MAIN HANDLER
    ════════════════════════════════════════════════════════ */
-module.exports = async function handler(req, res) {
+export default async function handler(req, res) {
   if (req.method === "OPTIONS") return res.status(200).end();
   if (req.method !== "POST") return res.status(405).json({ error: "POST only" });
 
