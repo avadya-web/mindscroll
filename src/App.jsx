@@ -69,196 +69,99 @@ const LIBRARY = [
 ];
 
 /* ====================== LIVE SOURCES ====================== */
-/* Pools (module-level so they survive re-renders) */
-const pool = { zen: [], quotable: [], wikiOTD: [], wikiRandom: [], dev: [], til: [], shower: [], redditQuotes: [], redditPhil: [], redditMotiv: [], redditTech: [] };
+let livePool = []; // cards fetched from /api/content, shared across calls
 let allRotate = 0;
 
 const hashText = (s) => { let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0; return 'h' + (h >>> 0).toString(36); };
 const clean = (s) => (s || '').replace(/[`´]/g, "'").replace(/\s+/g, ' ').trim();
 function shuffle(a) { a = [...a]; for (let i = a.length - 1; i > 0; i--) { const j = (Math.random() * (i + 1)) | 0; [a[i], a[j]] = [a[j], a[i]]; } return a; }
-
 const BAD = /\b(kill(ed|s|ing)?|murder|massacre|dead|death|die[ds]?|suicide|rape|genocide|nazi|war crime|atrocit)\b/i;
-const REDDIT_UA = 'MindScroll/1.0';
 
-/* ── Reddit (primary source — millions of upvoted posts, fresh daily) ── */
-async function fetchReddit(sub, sort = 'top', time = 'day', limit = 50) {
+/* ── Primary: Vercel serverless proxy → Reddit + all sources server-side ── */
+async function fetchFromProxy(cat) {
   try {
-    const url = 'https://www.reddit.com/r/' + sub + '/' + sort + '.json?limit=' + limit + (time ? '&t=' + time : '') + '&raw_json=1';
-    const d = await (await fetch(url, { headers: { 'Accept': 'application/json' } })).json();
-    return (d?.data?.children || []).map(c => c.data).filter(p => p && !p.over_18 && p.score > 50 && p.title && !BAD.test(p.title));
+    const res = await fetch('/api/content?cat=' + cat);
+    if (!res.ok) throw new Error('proxy ' + res.status);
+    const cards = await res.json();
+    if (Array.isArray(cards) && cards.length > 0) {
+      livePool.push(...cards);
+      return true;
+    }
+  } catch (e) {
+    console.warn('proxy failed, using direct fallbacks:', e.message);
+  }
+  return false;
+}
+
+/* ── Direct fallbacks (browser-friendly APIs — no Reddit) ── */
+async function fetchQuotableDirect(cat) {
+  try {
+    const tag = cat === 'philosophy' ? 'philosophy|wisdom|stoicism' : 'inspirational|motivational|success';
+    const d = await (await fetch('https://api.quotable.io/quotes/random?limit=30&tags=' + tag + '&minLength=30&maxLength=200')).json();
+    return (Array.isArray(d) ? d : []).filter(x => x.content && x.author).map(x => ({ cat, text: clean(x.content), author: clean(x.author), note: (x.tags || []).join(' · '), source: 'Quotable', url: 'https://en.wikipedia.org/wiki/' + encodeURIComponent(x.author), live: true }));
   } catch { return []; }
 }
 
-async function ensureReddit(key, sub, sort, time, transform) {
-  if (pool[key].length > 3) return;
-  const posts = await fetchReddit(sub, sort, time);
-  pool[key].push(...shuffle(posts).map(transform));
+async function fetchHNDirect() {
+  try {
+    const queries = ['artificial intelligence', 'machine learning', 'open source', 'startup', 'software'];
+    const q = queries[(Math.random() * queries.length) | 0];
+    const d = await (await fetch('https://hn.algolia.com/api/v1/search?query=' + encodeURIComponent(q) + '&tags=story&numericFilters=points%3E80&hitsPerPage=30')).json();
+    return shuffle((d.hits || []).filter(h => h.title && !BAD.test(h.title))).slice(0, 15).map(h => ({ cat: 'tech', text: clean(h.title), author: 'Hacker News', note: h.points + ' points · trending on HN', url: h.url || 'https://news.ycombinator.com/item?id=' + h.objectID, source: 'Hacker News', live: true }));
+  } catch { return []; }
 }
 
-const redditCard = (cat, note) => p => ({
-  cat, text: clean(p.title), author: note,
-  note: p.score.toLocaleString() + ' upvotes · r/' + p.subreddit,
-  url: 'https://reddit.com' + p.permalink, source: 'Reddit', live: true
-});
-
-/* Philosophy: r/Showerthoughts + r/philosophy */
-async function srcPhilosophy(n) {
-  await Promise.allSettled([
-    ensureReddit('shower', 'Showerthoughts', 'top', 'day', redditCard('philosophy', 'Shower Thought')),
-    ensureReddit('redditPhil', 'philosophy', 'top', 'week', redditCard('philosophy', 'r/philosophy')),
-    pool.quotable.length < n ? fetchQuotable('philosophy|wisdom|stoicism').then(items => pool.quotable.push(...items)) : Promise.resolve(),
-    pool.zen.length < n ? fetchZen() : Promise.resolve(),
-  ]);
-  return interleave(n, pool.shower, pool.redditPhil, pool.quotable, pool.zen);
+async function fetchWikiRandomDirect() {
+  try {
+    const results = await Promise.allSettled(Array.from({ length: 8 }, () => fetch('https://en.wikipedia.org/api/rest_v1/page/random/summary').then(r => r.json())));
+    return results.filter(r => r.status === 'fulfilled').map(r => r.value).filter(p => p.extract && p.extract.length > 80 && !BAD.test(p.extract) && p.type === 'standard').map(p => ({ cat: 'wonder', text: p.title, author: 'Wikipedia', note: clean(p.extract.split('. ').slice(0, 2).join('. ').slice(0, 240)), url: p.content_urls?.desktop?.page, source: 'Wikipedia', live: true }));
+  } catch { return []; }
 }
 
-/* Motivation/Fire: r/GetMotivated + r/quotes */
-async function srcMotivation(n) {
-  await Promise.allSettled([
-    ensureReddit('redditMotiv', 'GetMotivated', 'top', 'day', p => ({ cat: 'motivation', text: clean(p.title.replace(/^[.*?]s*/,'')), author: 'r/GetMotivated', note: p.score.toLocaleString() + ' upvotes', url: 'https://reddit.com' + p.permalink, source: 'Reddit', live: true })),
-    ensureReddit('redditQuotes', 'quotes', 'top', 'week', p => ({ cat: 'motivation', text: clean(p.title), author: 'r/quotes', note: p.score.toLocaleString() + ' upvotes', url: 'https://reddit.com' + p.permalink, source: 'Reddit', live: true })),
-    pool.quotable.length < n ? fetchQuotable('inspirational|motivational|success').then(items => pool.quotable.push(...items)) : Promise.resolve(),
-    pool.zen.length < n ? fetchZen() : Promise.resolve(),
-  ]);
-  return interleave(n, pool.redditMotiv, pool.redditQuotes, pool.quotable, pool.zen);
-}
-
-/* Tech: r/technology + HN + Dev.to */
-async function srcTech(n) {
-  await Promise.allSettled([
-    ensureReddit('redditTech', 'technology', 'top', 'day', p => ({ cat: 'tech', text: clean(p.title), author: 'r/technology', note: p.score.toLocaleString() + ' upvotes · ' + (p.num_comments || 0) + ' comments', url: p.url || 'https://reddit.com' + p.permalink, source: 'Reddit', live: true })),
-    srcHN(Math.ceil(n / 3)).then(cards => pool.dev.push(...cards)),
-    srcDevTo(Math.ceil(n / 3)).then(cards => pool.dev.push(...cards)),
-  ]);
-  return interleave(n, pool.redditTech, pool.dev);
-}
-
-/* Wonder: r/todayilearned + Wikipedia Random + NASA + Numbers */
-async function srcWonder(n) {
-  await Promise.allSettled([
-    ensureReddit('til', 'todayilearned', 'top', 'day', p => {
-      const text = clean(p.title).replace(/^TILs*(thats*)?:?s*/i, '');
-      return { cat: 'wonder', text, author: 'Today I Learned', note: p.score.toLocaleString() + ' upvotes · r/todayilearned', url: 'https://reddit.com' + p.permalink, source: 'Reddit', live: true };
-    }),
-    pool.wikiRandom.length < n ? fetchWikiRandom() : Promise.resolve(),
-    fetchWikiOTD(),
-    srcNASA().then(c => c && pool.wikiOTD.push(c)),
-    srcNumbers().then(c => c && pool.wikiOTD.push(c)),
-    srcFact().then(c => c && pool.wikiOTD.push(c)),
-  ]);
-  return interleave(n, pool.til, pool.wikiRandom, pool.wikiOTD);
-}
-
-/* Helpers */
-function interleave(n, ...sources) {
-  const out = [];
-  const maxLen = Math.max(...sources.map(s => s.length));
-  for (let i = 0; i < maxLen && out.length < n * 2; i++) {
-    for (const s of sources) { if (s[i]) out.push(s[i]); }
-  }
-  // consume from sources
-  const used = out.slice(0, n);
-  used.forEach(card => {
-    for (const s of sources) {
-      const idx = s.indexOf(card);
-      if (idx !== -1) { s.splice(idx, 1); break; }
-    }
-  });
-  return used;
-}
-
-/* ── ZenQuotes ── */
-async function fetchZen() {
+async function fetchZenDirect(cat) {
   try {
     const d = await (await fetch('https://zenquotes.io/api/quotes')).json();
-    if (Array.isArray(d)) pool.zen.push(...shuffle(d.filter(x => x.q && x.a && x.a.toLowerCase() !== 'zenquotes.io').map(x => ({ cat: 'philosophy', text: clean(x.q), author: clean(x.a), note: '', source: 'ZenQuotes', url: 'https://zenquotes.io', live: true }))));
-  } catch { }
-}
-
-/* ── Quotable.io ── */
-async function fetchQuotable(tag) {
-  try {
-    const d = await (await fetch('https://api.quotable.io/quotes/random?limit=20&tags=' + tag + '&minLength=30&maxLength=180')).json();
-    return (Array.isArray(d) ? d : []).filter(x => x.content && x.author).map(x => ({ cat: 'philosophy', text: clean(x.content), author: clean(x.author), note: (x.tags || []).join(' · '), source: 'Quotable', url: 'https://en.wikipedia.org/wiki/' + encodeURIComponent(x.author), live: true }));
+    return shuffle((Array.isArray(d) ? d : []).filter(x => x.q && x.a && x.a.toLowerCase() !== 'zenquotes.io').map(x => ({ cat, text: clean(x.q), author: clean(x.a), note: '', source: 'ZenQuotes', url: 'https://zenquotes.io', live: true })));
   } catch { return []; }
-}
-
-/* ── Hacker News ── */
-const HN_Q = ['artificial intelligence', 'machine learning', 'LLM', 'robotics', 'open source AI', 'quantum computing', 'startup', 'developer tools', 'software engineering'];
-async function srcHN(n) {
-  try {
-    const q = HN_Q[(Math.random() * HN_Q.length) | 0];
-    const d = await (await fetch('https://hn.algolia.com/api/v1/search?query=' + encodeURIComponent(q) + '&tags=story&numericFilters=points%3E80&hitsPerPage=25')).json();
-    return shuffle((d.hits || []).filter(h => h.title && !BAD.test(h.title))).slice(0, n).map(h => ({ cat: 'tech', text: clean(h.title), author: 'Hacker News', note: h.points + ' points · trending right now', url: h.url || 'https://news.ycombinator.com/item?id=' + h.objectID, source: 'Hacker News', live: true }));
-  } catch { return []; }
-}
-
-/* ── Dev.to ── */
-async function srcDevTo(n) {
-  try {
-    const d = await (await fetch('https://dev.to/api/articles?top=7&per_page=20')).json();
-    return shuffle((Array.isArray(d) ? d : []).filter(a => a.title && !BAD.test(a.title) && a.reading_time_minutes > 1)).slice(0, n).map(a => ({ cat: 'tech', text: clean(a.title), author: a.user?.name || 'Dev.to', note: a.reading_time_minutes + ' min read · Dev.to', url: a.url, source: 'Dev.to', live: true }));
-  } catch { return []; }
-}
-
-/* ── Wikipedia Random ── */
-async function fetchWikiRandom() {
-  try {
-    const results = await Promise.allSettled(Array.from({ length: 5 }, () => fetch('https://en.wikipedia.org/api/rest_v1/page/random/summary').then(r => r.json())));
-    pool.wikiRandom.push(...results.filter(r => r.status === 'fulfilled').map(r => r.value).filter(p => p.extract && p.extract.length > 80 && !BAD.test(p.extract) && p.type === 'standard').map(p => ({ cat: 'wonder', text: p.title, author: 'Wikipedia', note: clean(p.extract.split('. ').slice(0, 2).join('. ').slice(0, 220)), url: p.content_urls?.desktop?.page, source: 'Wikipedia', live: true })));
-  } catch { }
-}
-
-/* ── Wikipedia On This Day ── */
-async function fetchWikiOTD() {
-  try {
-    const mm = String(new Date().getMonth() + 1).padStart(2, '0'), dd = String(new Date().getDate()).padStart(2, '0');
-    const d = await (await fetch('https://en.wikipedia.org/api/rest_v1/feed/onthisday/selected/' + mm + '/' + dd)).json();
-    const items = [...(d.selected || []), ...(d.events || [])].filter(x => x.text && !BAD.test(x.text)).map(x => ({ cat: 'wonder', text: clean(x.text), author: x.year ? 'On this day · ' + x.year : 'On this day', note: 'A moment in history worth knowing.', url: x.pages?.[0]?.content_urls?.desktop?.page, source: 'Wikipedia', live: true }));
-    pool.wikiOTD.push(...shuffle(items));
-  } catch { }
-}
-
-/* ── NASA APOD ── */
-async function srcNASA() {
-  try {
-    const d = await (await fetch('https://api.nasa.gov/planetary/apod?api_key=DEMO_KEY')).json();
-    if (d.title && d.explanation && !BAD.test(d.explanation)) return { cat: 'wonder', text: d.title, author: 'NASA · ' + d.date, note: clean(d.explanation.split('. ').slice(0, 2).join('. ').slice(0, 220) + '.'), url: d.hdurl || d.url, source: 'NASA APOD', live: true };
-  } catch { }
-  return null;
-}
-
-/* ── Numbers API ── */
-async function srcNumbers() {
-  try {
-    const d = await (await fetch('https://numbersapi.com/random/trivia?json')).json();
-    if (d.text && !BAD.test(d.text)) return { cat: 'wonder', text: clean(d.text), author: 'Numbers', note: 'Mathematics is the language of the universe.', source: 'Numbers API', live: true };
-  } catch { }
-  return null;
-}
-
-/* ── Useless Facts ── */
-async function srcFact() {
-  try {
-    const d = await (await fetch('https://uselessfacts.jsph.pl/api/v2/facts/random')).json();
-    const t = clean(d.text);
-    if (t && t.length > 20 && !BAD.test(t)) return { cat: 'wonder', text: t, author: 'Did you know?', note: '', source: 'Useless Facts', live: true };
-  } catch { }
-  return null;
 }
 
 async function getLiveRaw(cat, n) {
-  if (cat === 'philosophy') return srcPhilosophy(n);
-  if (cat === 'motivation') return srcMotivation(n);
-  if (cat === 'tech') return srcTech(n);
-  if (cat === 'wonder') return srcWonder(n);
   if (cat === 'models') return [];
   if (cat === 'word') return srcWord();
-  // 'all' — rotate across all sources
-  const order = [() => srcPhilosophy(n), () => srcTech(n), () => srcWonder(n), () => srcMotivation(n)];
-  return order[(allRotate++) % order.length]();
-}
 
+  // Drain existing pool for this category first
+  const fromPool = [];
+  const remaining = [];
+  for (const c of livePool) {
+    if (fromPool.length < n && (cat === 'all' || c.cat === cat)) fromPool.push(c);
+    else remaining.push(c);
+  }
+  livePool = remaining;
+  if (fromPool.length >= n) return fromPool;
+
+  // Pool low — fetch fresh batch from proxy
+  const proxyCat = cat === 'all' ? ['philosophy', 'motivation', 'tech', 'wonder'][allRotate++ % 4] : cat;
+  const proxyOk = await fetchFromProxy(proxyCat);
+
+  if (proxyOk) {
+    // Drain again after fill
+    const fresh = [];
+    const rest = [];
+    for (const c of livePool) {
+      if (fresh.length < n && (cat === 'all' || c.cat === cat)) fresh.push(c);
+      else rest.push(c);
+    }
+    livePool = rest;
+    return [...fromPool, ...fresh].slice(0, n);
+  }
+
+  // Proxy failed — use direct browser-friendly sources
+  let fallback = [];
+  if (cat === 'philosophy' || cat === 'motivation' || cat === 'all') fallback.push(...await fetchZenDirect(cat === 'all' ? 'philosophy' : cat), ...await fetchQuotableDirect(cat === 'all' ? 'philosophy' : cat));
+  if (cat === 'tech' || cat === 'all') fallback.push(...await fetchHNDirect());
+  if (cat === 'wonder' || cat === 'all') fallback.push(...await fetchWikiRandomDirect());
+  return [...fromPool, ...shuffle(fallback)].slice(0, n);
+}
 
 
 /* ====================== WORD OF THE DAY ====================== */
