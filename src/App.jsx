@@ -72,55 +72,45 @@ const LIBRARY = [
 const hashText = (s) => { let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0; return 'h' + (h >>> 0).toString(36); };
 const clean = (s) => (s || '').replace(/[`´]/g, "'").replace(/\s+/g, ' ').trim();
 function shuffle(a) { a = [...a]; for (let i = a.length - 1; i > 0; i--) { const j = (Math.random() * (i + 1)) | 0; [a[i], a[j]] = [a[j], a[i]]; } return a; }
-const BAD = /\b(kill(ed|s|ing)?|murder|massacre|dead|death|die[ds]?|suicide|rape|genocide|nazi|war crime|atrocit)\b/i;
 
-/* Live pool filled by /api/feed, drained card by card */
+/*
+ * livePool — cards returned by /api/feed, drained one batch at a time.
+ * The ONLY external calls the client ever makes are to /api/feed (same origin).
+ * All third-party fetches (Reddit, RSS, HN, Quotable, …) happen server-side.
+ */
 let livePool = [];
 
-/* Primary: POST /api/feed — Claude-curated cards, server-side sources */
 async function fetchFreshCards(categories, recentTexts) {
   const res = await fetch('/api/feed', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ categories, recentlySeen: recentTexts.slice(-60), count: 10 }),
+    body: JSON.stringify({
+      categories,
+      recentlySeen: recentTexts.slice(-60),
+      count: 10,
+    }),
   });
-  if (!res.ok) throw new Error('feed ' + res.status);
+  if (!res.ok) throw new Error(`/api/feed returned ${res.status}`);
   const data = await res.json();
   return (data.cards || []).map((c) => ({
-    cat: c.category, text: clean(c.text), author: c.author || '—',
-    note: c.note || '', url: c.sourceUrl || '', source: c.sourceName || 'Live',
-    live: true, id: uid(),
+    cat:    c.category,
+    text:   clean(c.text),
+    author: c.author   || '—',
+    note:   c.note     || '',
+    url:    c.sourceUrl || '',
+    source: c.sourceName || 'Live',
+    live: true,
+    id: uid(),
   }));
 }
 
-/* Browser-friendly direct fallbacks */
-async function fetchHNDirect() {
-  try {
-    const queries = ['artificial intelligence', 'machine learning', 'open source', 'startup', 'science'];
-    const q = queries[(Math.random() * queries.length) | 0];
-    const d = await (await fetch('https://hn.algolia.com/api/v1/search?query=' + encodeURIComponent(q) + '&tags=story&numericFilters=points%3E60&hitsPerPage=20')).json();
-    return shuffle((d.hits || []).filter(h => h.title && !BAD.test(h.title))).slice(0, 10).map(h => ({ cat: 'tech', text: clean(h.title), author: 'Hacker News', note: h.points + ' points · trending on HN', url: h.url || 'https://news.ycombinator.com/item?id=' + h.objectID, source: 'Hacker News', live: true, id: uid() }));
-  } catch { return []; }
-}
-async function fetchWikiDirect() {
-  try {
-    const results = await Promise.allSettled(Array.from({ length: 6 }, () => fetch('https://en.wikipedia.org/api/rest_v1/page/random/summary').then(r => r.json())));
-    return results.filter(r => r.status === 'fulfilled').map(r => r.value).filter(p => p.extract && p.extract.length > 80 && !BAD.test(p.extract) && p.type === 'standard').map(p => ({ cat: 'wonder', text: p.title, author: 'Wikipedia', note: clean(p.extract.split('. ').slice(0, 2).join('. ').slice(0, 220)), url: p.content_urls?.desktop?.page, source: 'Wikipedia', live: true, id: uid() }));
-  } catch { return []; }
-}
-async function fetchQuotableDirect(cat) {
-  try {
-    const tag = cat === 'philosophy' ? 'philosophy|wisdom|stoicism' : 'inspirational|motivational|success';
-    const d = await (await fetch('https://api.quotable.io/quotes/random?limit=20&tags=' + tag + '&minLength=30&maxLength=180')).json();
-    return (Array.isArray(d) ? d : []).filter(x => x.content && x.author).map(x => ({ cat, text: clean(x.content), author: clean(x.author), note: (x.tags || []).join(' · '), source: 'Quotable', url: 'https://en.wikipedia.org/wiki/' + encodeURIComponent(x.author), live: true, id: uid() }));
-  } catch { return []; }
-}
-
-async function getLiveRaw(cat, n, seenHashes) {
+async function getLiveRaw(cat, n, recentTexts) {
+  /* Word of the day bypasses the feed endpoint */
+  if (cat === 'word')   return srcWord();
+  /* Mental-models cards are curated-only; no external source covers them well */
   if (cat === 'models') return [];
-  if (cat === 'word') return srcWord();
 
-  /* Drain existing pool first */
+  /* 1 — drain whatever is already in the pool for this category */
   const out = [], rest = [];
   for (const c of livePool) {
     if (out.length < n && (cat === 'all' || c.cat === cat)) out.push(c);
@@ -129,28 +119,22 @@ async function getLiveRaw(cat, n, seenHashes) {
   livePool = rest;
   if (out.length >= n) return out;
 
-  /* Pool low: call Claude-powered /api/feed */
-  const cats = cat === 'all' ? ['philosophy', 'motivation', 'tech', 'wonder'] : [cat];
-  try {
-    const fresh = await fetchFreshCards(cats, [...seenHashes]);
-    livePool.push(...fresh);
-    const out2 = [], rest2 = [];
-    for (const c of livePool) {
-      if (out2.length < n - out.length && (cat === 'all' || c.cat === cat)) out2.push(c);
-      else rest2.push(c);
-    }
-    livePool = rest2;
-    return [...out, ...out2].slice(0, n);
-  } catch (e) {
-    console.warn('/api/feed unavailable, using direct fallbacks:', e.message);
-  }
+  /* 2 — pool is low: hit /api/feed for a fresh batch */
+  const cats = cat === 'all'
+    ? ['philosophy', 'motivation', 'tech', 'wonder']
+    : [cat];
 
-  /* Direct browser fallbacks */
-  const fb = [];
-  if (['philosophy', 'motivation', 'all'].includes(cat)) fb.push(...await fetchQuotableDirect(cat === 'all' ? 'philosophy' : cat));
-  if (['tech', 'all'].includes(cat)) fb.push(...await fetchHNDirect());
-  if (['wonder', 'all'].includes(cat)) fb.push(...await fetchWikiDirect());
-  return [...out, ...shuffle(fb)].slice(0, n);
+  const fresh = await fetchFreshCards(cats, recentTexts); // throws on error
+  livePool.push(...fresh);
+
+  /* 3 — drain again after refill */
+  const out2 = [], rest2 = [];
+  for (const c of livePool) {
+    if (out2.length < n - out.length && (cat === 'all' || c.cat === cat)) out2.push(c);
+    else rest2.push(c);
+  }
+  livePool = rest2;
+  return [...out, ...out2].slice(0, n);
 }
 
 
