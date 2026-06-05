@@ -69,98 +69,88 @@ const LIBRARY = [
 ];
 
 /* ====================== LIVE SOURCES ====================== */
-let livePool = []; // cards fetched from /api/content, shared across calls
-let allRotate = 0;
-
 const hashText = (s) => { let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0; return 'h' + (h >>> 0).toString(36); };
 const clean = (s) => (s || '').replace(/[`´]/g, "'").replace(/\s+/g, ' ').trim();
 function shuffle(a) { a = [...a]; for (let i = a.length - 1; i > 0; i--) { const j = (Math.random() * (i + 1)) | 0; [a[i], a[j]] = [a[j], a[i]]; } return a; }
 const BAD = /\b(kill(ed|s|ing)?|murder|massacre|dead|death|die[ds]?|suicide|rape|genocide|nazi|war crime|atrocit)\b/i;
 
-/* ── Primary: Vercel serverless proxy → Reddit + all sources server-side ── */
-async function fetchFromProxy(cat) {
-  try {
-    const res = await fetch('/api/content?cat=' + cat);
-    if (!res.ok) throw new Error('proxy ' + res.status);
-    const cards = await res.json();
-    if (Array.isArray(cards) && cards.length > 0) {
-      livePool.push(...cards);
-      return true;
-    }
-  } catch (e) {
-    console.warn('proxy failed, using direct fallbacks:', e.message);
-  }
-  return false;
+/* Live pool filled by /api/feed, drained card by card */
+let livePool = [];
+
+/* Primary: POST /api/feed — Claude-curated cards, server-side sources */
+async function fetchFreshCards(categories, recentTexts) {
+  const res = await fetch('/api/feed', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ categories, recentlySeen: recentTexts.slice(-60), count: 10 }),
+  });
+  if (!res.ok) throw new Error('feed ' + res.status);
+  const data = await res.json();
+  return (data.cards || []).map((c) => ({
+    cat: c.category, text: clean(c.text), author: c.author || '—',
+    note: c.note || '', url: c.sourceUrl || '', source: c.sourceName || 'Live',
+    live: true, id: uid(),
+  }));
 }
 
-/* ── Direct fallbacks (browser-friendly APIs — no Reddit) ── */
+/* Browser-friendly direct fallbacks */
+async function fetchHNDirect() {
+  try {
+    const queries = ['artificial intelligence', 'machine learning', 'open source', 'startup', 'science'];
+    const q = queries[(Math.random() * queries.length) | 0];
+    const d = await (await fetch('https://hn.algolia.com/api/v1/search?query=' + encodeURIComponent(q) + '&tags=story&numericFilters=points%3E60&hitsPerPage=20')).json();
+    return shuffle((d.hits || []).filter(h => h.title && !BAD.test(h.title))).slice(0, 10).map(h => ({ cat: 'tech', text: clean(h.title), author: 'Hacker News', note: h.points + ' points · trending on HN', url: h.url || 'https://news.ycombinator.com/item?id=' + h.objectID, source: 'Hacker News', live: true, id: uid() }));
+  } catch { return []; }
+}
+async function fetchWikiDirect() {
+  try {
+    const results = await Promise.allSettled(Array.from({ length: 6 }, () => fetch('https://en.wikipedia.org/api/rest_v1/page/random/summary').then(r => r.json())));
+    return results.filter(r => r.status === 'fulfilled').map(r => r.value).filter(p => p.extract && p.extract.length > 80 && !BAD.test(p.extract) && p.type === 'standard').map(p => ({ cat: 'wonder', text: p.title, author: 'Wikipedia', note: clean(p.extract.split('. ').slice(0, 2).join('. ').slice(0, 220)), url: p.content_urls?.desktop?.page, source: 'Wikipedia', live: true, id: uid() }));
+  } catch { return []; }
+}
 async function fetchQuotableDirect(cat) {
   try {
     const tag = cat === 'philosophy' ? 'philosophy|wisdom|stoicism' : 'inspirational|motivational|success';
-    const d = await (await fetch('https://api.quotable.io/quotes/random?limit=30&tags=' + tag + '&minLength=30&maxLength=200')).json();
-    return (Array.isArray(d) ? d : []).filter(x => x.content && x.author).map(x => ({ cat, text: clean(x.content), author: clean(x.author), note: (x.tags || []).join(' · '), source: 'Quotable', url: 'https://en.wikipedia.org/wiki/' + encodeURIComponent(x.author), live: true }));
+    const d = await (await fetch('https://api.quotable.io/quotes/random?limit=20&tags=' + tag + '&minLength=30&maxLength=180')).json();
+    return (Array.isArray(d) ? d : []).filter(x => x.content && x.author).map(x => ({ cat, text: clean(x.content), author: clean(x.author), note: (x.tags || []).join(' · '), source: 'Quotable', url: 'https://en.wikipedia.org/wiki/' + encodeURIComponent(x.author), live: true, id: uid() }));
   } catch { return []; }
 }
 
-async function fetchHNDirect() {
-  try {
-    const queries = ['artificial intelligence', 'machine learning', 'open source', 'startup', 'software'];
-    const q = queries[(Math.random() * queries.length) | 0];
-    const d = await (await fetch('https://hn.algolia.com/api/v1/search?query=' + encodeURIComponent(q) + '&tags=story&numericFilters=points%3E80&hitsPerPage=30')).json();
-    return shuffle((d.hits || []).filter(h => h.title && !BAD.test(h.title))).slice(0, 15).map(h => ({ cat: 'tech', text: clean(h.title), author: 'Hacker News', note: h.points + ' points · trending on HN', url: h.url || 'https://news.ycombinator.com/item?id=' + h.objectID, source: 'Hacker News', live: true }));
-  } catch { return []; }
-}
-
-async function fetchWikiRandomDirect() {
-  try {
-    const results = await Promise.allSettled(Array.from({ length: 8 }, () => fetch('https://en.wikipedia.org/api/rest_v1/page/random/summary').then(r => r.json())));
-    return results.filter(r => r.status === 'fulfilled').map(r => r.value).filter(p => p.extract && p.extract.length > 80 && !BAD.test(p.extract) && p.type === 'standard').map(p => ({ cat: 'wonder', text: p.title, author: 'Wikipedia', note: clean(p.extract.split('. ').slice(0, 2).join('. ').slice(0, 240)), url: p.content_urls?.desktop?.page, source: 'Wikipedia', live: true }));
-  } catch { return []; }
-}
-
-async function fetchZenDirect(cat) {
-  try {
-    const d = await (await fetch('https://zenquotes.io/api/quotes')).json();
-    return shuffle((Array.isArray(d) ? d : []).filter(x => x.q && x.a && x.a.toLowerCase() !== 'zenquotes.io').map(x => ({ cat, text: clean(x.q), author: clean(x.a), note: '', source: 'ZenQuotes', url: 'https://zenquotes.io', live: true })));
-  } catch { return []; }
-}
-
-async function getLiveRaw(cat, n) {
+async function getLiveRaw(cat, n, seenHashes) {
   if (cat === 'models') return [];
   if (cat === 'word') return srcWord();
 
-  // Drain existing pool for this category first
-  const fromPool = [];
-  const remaining = [];
+  /* Drain existing pool first */
+  const out = [], rest = [];
   for (const c of livePool) {
-    if (fromPool.length < n && (cat === 'all' || c.cat === cat)) fromPool.push(c);
-    else remaining.push(c);
+    if (out.length < n && (cat === 'all' || c.cat === cat)) out.push(c);
+    else rest.push(c);
   }
-  livePool = remaining;
-  if (fromPool.length >= n) return fromPool;
+  livePool = rest;
+  if (out.length >= n) return out;
 
-  // Pool low — fetch fresh batch from proxy
-  const proxyCat = cat === 'all' ? ['philosophy', 'motivation', 'tech', 'wonder'][allRotate++ % 4] : cat;
-  const proxyOk = await fetchFromProxy(proxyCat);
-
-  if (proxyOk) {
-    // Drain again after fill
-    const fresh = [];
-    const rest = [];
+  /* Pool low: call Claude-powered /api/feed */
+  const cats = cat === 'all' ? ['philosophy', 'motivation', 'tech', 'wonder'] : [cat];
+  try {
+    const fresh = await fetchFreshCards(cats, [...seenHashes]);
+    livePool.push(...fresh);
+    const out2 = [], rest2 = [];
     for (const c of livePool) {
-      if (fresh.length < n && (cat === 'all' || c.cat === cat)) fresh.push(c);
-      else rest.push(c);
+      if (out2.length < n - out.length && (cat === 'all' || c.cat === cat)) out2.push(c);
+      else rest2.push(c);
     }
-    livePool = rest;
-    return [...fromPool, ...fresh].slice(0, n);
+    livePool = rest2;
+    return [...out, ...out2].slice(0, n);
+  } catch (e) {
+    console.warn('/api/feed unavailable, using direct fallbacks:', e.message);
   }
 
-  // Proxy failed — use direct browser-friendly sources
-  let fallback = [];
-  if (cat === 'philosophy' || cat === 'motivation' || cat === 'all') fallback.push(...await fetchZenDirect(cat === 'all' ? 'philosophy' : cat), ...await fetchQuotableDirect(cat === 'all' ? 'philosophy' : cat));
-  if (cat === 'tech' || cat === 'all') fallback.push(...await fetchHNDirect());
-  if (cat === 'wonder' || cat === 'all') fallback.push(...await fetchWikiRandomDirect());
-  return [...fromPool, ...shuffle(fallback)].slice(0, n);
+  /* Direct browser fallbacks */
+  const fb = [];
+  if (['philosophy', 'motivation', 'all'].includes(cat)) fb.push(...await fetchQuotableDirect(cat === 'all' ? 'philosophy' : cat));
+  if (['tech', 'all'].includes(cat)) fb.push(...await fetchHNDirect());
+  if (['wonder', 'all'].includes(cat)) fb.push(...await fetchWikiDirect());
+  return [...out, ...shuffle(fb)].slice(0, n);
 }
 
 
@@ -342,18 +332,19 @@ export default function MindScroll() {
     if (busyRef.current) return;
     busyRef.current = true;
     try {
-      const raw = await getLiveRaw(cat, 6);
+      // Pass seenRef so /api/feed can tell Claude what to avoid
+      const raw = await getLiveRaw(cat, 8, seenRef.current);
       const fresh = [];
       for (const c of raw) {
         const h = hashText(c.text);
         if (seenRef.current.has(h)) continue;
         seenRef.current.add(h);
-        fresh.push({ ...c, id: uid() });
+        fresh.push({ ...c, id: c.id || uid() });
       }
       if (fresh.length) { setLiveOn(true); }
-      const curated = build(cat).slice(0, 5);
       persistSeen();
-      const batch = fresh.length >= 3 ? fresh : [...fresh, ...curated];
+      // Only fall back to curated if live returned nothing at all
+      const batch = fresh.length > 0 ? fresh : build(cat).slice(0, 5);
       // On first load, put live cards at the top so they're seen immediately
       setFeed((f) => prepend ? [...batch, ...f] : [...f, ...batch]);
     } catch {
