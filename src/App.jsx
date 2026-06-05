@@ -302,9 +302,10 @@ export default function MindScroll() {
 
   const feedRef = useRef(null);
   const cardRefs = useRef([]);
-  const counted = useRef(new Set());       // session: which cards counted toward daily total
-  const seenRef = useRef(new Set());        // persistent: hashes of live nuggets already shown
-  const seenCurated = useRef(new Set());   // daily: indices of curated cards already served
+  const counted = useRef(new Set());        // session: which cards counted toward daily total
+  const seenRef = useRef(new Set());        // persistent: hashes — dedup gate
+  const recentTexts = useRef([]);           // persistent: raw texts sent to Claude to avoid repeats
+  const seenCurated = useRef(new Set());    // daily: curated card texts already served
   const busyRef = useRef(false);            // prevent overlapping live fetches
   const seenTimer = useRef(null);
   const ioRef = useRef(null);
@@ -324,6 +325,7 @@ export default function MindScroll() {
     seenTimer.current = setTimeout(() => {
       store.set("seenHashes", [...seenRef.current].slice(-5000));
       store.set("seenCurated", { d: todayKey(), keys: [...seenCurated.current] });
+      store.set("recentTexts", recentTexts.current.slice(-80));
     }, 700);
   };
 
@@ -332,13 +334,15 @@ export default function MindScroll() {
     if (busyRef.current) return;
     busyRef.current = true;
     try {
-      // Pass seenRef so /api/feed can tell Claude what to avoid
-      const raw = await getLiveRaw(cat, 8, seenRef.current);
+      const raw = await getLiveRaw(cat, 8, recentTexts.current);
       const fresh = [];
       for (const c of raw) {
         const h = hashText(c.text);
         if (seenRef.current.has(h)) continue;
         seenRef.current.add(h);
+        // Track raw text for Claude's "avoid repeats" context
+        recentTexts.current.push(c.text.slice(0, 120));
+        if (recentTexts.current.length > 80) recentTexts.current.shift();
         fresh.push({ ...c, id: c.id || uid() });
       }
       if (fresh.length) { setLiveOn(true); }
@@ -358,9 +362,12 @@ export default function MindScroll() {
   useEffect(() => {
     (async () => {
       setSaved(await store.get("saved", []));
-      // seenHashes: permanent across sessions — once seen, never repeated until pool > 5000
+      // seenHashes: permanent — hash-based dedup gate
       const seenStored = await store.get("seenHashes", []);
       seenRef.current = new Set(Array.isArray(seenStored) ? seenStored : []);
+      // recentTexts: raw texts sent to Claude so it avoids repeats (capped at 80)
+      const rt = await store.get("recentTexts", []);
+      recentTexts.current = Array.isArray(rt) ? rt : [];
       // seenCurated: resets when all 40 curated cards are exhausted (handled in build())
       const sc = await store.get("seenCurated", { d: "", keys: [] });
       const tk0 = todayKey();
@@ -405,9 +412,14 @@ export default function MindScroll() {
         if (e.isIntersecting && e.intersectionRatio > 0.55) {
           e.target.classList.add("in");
           setActive(idx);
-          const id = feed[idx]?.id;
-          if (id && !counted.current.has(id)) {
-            counted.current.add(id);
+          const card = feed[idx];
+          if (card && !counted.current.has(card.id)) {
+            counted.current.add(card.id);
+            // Record shown text so Claude avoids it next fetch
+            if (card.text && !recentTexts.current.includes(card.text.slice(0, 120))) {
+              recentTexts.current.push(card.text.slice(0, 120));
+              if (recentTexts.current.length > 80) recentTexts.current.shift();
+            }
             setToday((t) => { const nv = t + 1; store.set("todayCount", { d: todayKey(), n: nv }); return nv; });
           }
         }
