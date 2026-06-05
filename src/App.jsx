@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
-import { Flame, Bookmark, BookmarkCheck, Sparkles, X, ArrowDown, Brain, ArrowUpRight } from "lucide-react";
+import { Flame, Bookmark, BookmarkCheck, Sparkles, X, ArrowDown, Brain, ArrowUpRight, Share2, Download } from "lucide-react";
 
 /* ================================================================== */
 /*  MINDSCROLL — a live feed that makes you smarter every swipe        */
@@ -218,8 +218,18 @@ const STYLE = `
 .ms-card.in .ms-note{animation:rise .6s .33s cubic-bezier(.2,.7,.2,1) forwards;}
 .ms-card.in .ms-src{animation:rise .6s .4s cubic-bezier(.2,.7,.2,1) forwards;}
 @keyframes rise{to{opacity:1;transform:translateY(0);}}
-.ms-save{position:absolute;right:24px;bottom:calc(118px + env(safe-area-inset-bottom));width:54px;height:54px;border-radius:50%;border:1px solid rgba(255,255,255,.16);background:rgba(255,255,255,.06);backdrop-filter:blur(10px);display:flex;align-items:center;justify-content:center;cursor:pointer;transition:transform .18s,background .2s;color:#F4ECE3;}
-.ms-save:active{transform:scale(.86);}
+.ms-actions{position:absolute;right:24px;bottom:calc(118px + env(safe-area-inset-bottom));display:flex;flex-direction:column;gap:12px;}
+.ms-save,.ms-share{width:54px;height:54px;border-radius:50%;border:1px solid rgba(255,255,255,.16);background:rgba(255,255,255,.06);backdrop-filter:blur(10px);display:flex;align-items:center;justify-content:center;cursor:pointer;transition:transform .18s,background .2s;color:#F4ECE3;}
+.ms-save:active,.ms-share:active{transform:scale(.86);}
+.ms-toast{position:absolute;bottom:calc(110px + env(safe-area-inset-bottom));left:50%;transform:translateX(-50%) translateY(10px);background:rgba(255,255,255,.12);backdrop-filter:blur(12px);border:1px solid rgba(255,255,255,.18);border-radius:999px;padding:9px 18px;font-size:13px;font-weight:700;white-space:nowrap;pointer-events:none;opacity:0;transition:opacity .2s,transform .2s;z-index:30;}
+.ms-toast.show{opacity:1;transform:translateX(-50%) translateY(0);}
+.ms-install{position:fixed;bottom:0;left:50%;transform:translateX(-50%);width:100%;max-width:520px;z-index:60;padding:16px 20px calc(16px + env(safe-area-inset-bottom));background:rgba(10,10,20,.96);backdrop-filter:blur(16px);border-top:1px solid rgba(255,255,255,.1);display:flex;align-items:center;gap:14px;animation:slideUp .3s cubic-bezier(.2,.7,.2,1);}
+.ms-install-icon{width:48px;height:48px;border-radius:12px;background:#05060a;border:1px solid rgba(255,255,255,.12);display:flex;align-items:center;justify-content:center;flex-shrink:0;}
+.ms-install-text{flex:1;}
+.ms-install-title{font-weight:700;font-size:15px;}
+.ms-install-sub{font-size:13px;color:rgba(244,236,227,.55);margin-top:2px;}
+.ms-install-btn{flex-shrink:0;padding:10px 18px;border-radius:999px;font-size:14px;font-weight:700;cursor:pointer;border:none;color:#05060a;}
+.ms-install-x{flex-shrink:0;opacity:.5;cursor:pointer;padding:4px;}
 .ms-top{position:absolute;top:0;left:0;right:0;z-index:20;padding:calc(16px + env(safe-area-inset-top)) 18px 30px;background:linear-gradient(180deg,rgba(0,0,0,.55),transparent);display:flex;align-items:center;justify-content:space-between;pointer-events:none;}
 .ms-top>*{pointer-events:auto;}
 .ms-brand{display:flex;align-items:center;gap:8px;font-family:'Fraunces',serif;font-weight:600;font-size:19px;letter-spacing:-.02em;}
@@ -289,6 +299,10 @@ export default function MindScroll() {
   const [generating, setGenerating] = useState(false);
   const [liveOn, setLiveOn] = useState(false);
   const [ready, setReady] = useState(false);
+  const [toast, setToast] = useState("");
+  const [installPrompt, setInstallPrompt] = useState(null);
+  const [showInstall, setShowInstall] = useState(false);
+  const toastTimer = useRef(null);
 
   const feedRef = useRef(null);
   const cardRefs = useRef([]);
@@ -426,6 +440,46 @@ export default function MindScroll() {
   };
   const isSaved = (card) => saved.some((c) => c.text === card.text);
 
+  const showToast = (msg) => {
+    setToast(msg);
+    clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToast(""), 2200);
+  };
+
+  const shareCard = async (card) => {
+    const text = `"${card.text}"${card.author && card.author !== "—" ? `\n— ${card.author}` : ""}`;
+    const shareData = { title: "MindScroll", text, url: card.url || "https://mindscroll.app" };
+    try {
+      if (navigator.share && navigator.canShare?.(shareData)) {
+        await navigator.share(shareData);
+      } else {
+        await navigator.clipboard.writeText(`${text}\n\nvia MindScroll`);
+        showToast("Copied to clipboard ✓");
+      }
+    } catch (e) {
+      if (e.name !== "AbortError") {
+        await navigator.clipboard.writeText(`${text}\n\nvia MindScroll`).catch(() => {});
+        showToast("Copied to clipboard ✓");
+      }
+    }
+  };
+
+  /* Capture the install prompt so we can show it at the right moment */
+  useEffect(() => {
+    const handler = (e) => { e.preventDefault(); setInstallPrompt(e); setShowInstall(true); };
+    window.addEventListener("beforeinstallprompt", handler);
+    return () => window.removeEventListener("beforeinstallprompt", handler);
+  }, []);
+
+  const triggerInstall = async () => {
+    if (!installPrompt) return;
+    installPrompt.prompt();
+    const { outcome } = await installPrompt.userChoice;
+    setInstallPrompt(null);
+    setShowInstall(false);
+    if (outcome === "accepted") showToast("MindScroll installed 🎉");
+  };
+
   /* Mobile back-button / swipe-back support for the saved overlay */
   const openSaved = () => {
     history.pushState({ savedOverlay: true }, "");
@@ -523,10 +577,16 @@ export default function MindScroll() {
                   {card.url && card.source === "the source" ? "Read the source" : card.url ? `Read on ${card.source}` : `via ${card.source}`} <ArrowUpRight size={14} />
                 </a>
               )}
-              <div className={`ms-save ${savedNow ? "on" : ""}`} onClick={() => toggleSave(card)}
-                style={savedNow ? { background: t.accent, borderColor: t.accent, color: "#05060a" } : {}}>
-                {savedNow ? <BookmarkCheck size={22} /> : <Bookmark size={22} />}
+              <div className="ms-actions">
+                <div className={`ms-save ${savedNow ? "on" : ""}`} onClick={() => toggleSave(card)}
+                  style={savedNow ? { background: t.accent, borderColor: t.accent, color: "#05060a" } : {}}>
+                  {savedNow ? <BookmarkCheck size={22} /> : <Bookmark size={22} />}
+                </div>
+                <div className="ms-share" onClick={() => shareCard(card)}>
+                  <Share2 size={20} />
+                </div>
               </div>
+              <div className={`ms-toast ${toast ? "show" : ""}`}>{toast}</div>
               {i === 0 && <div className="ms-hint"><ArrowDown size={18} /> swipe up to get smarter</div>}
             </div>
           );
@@ -537,6 +597,20 @@ export default function MindScroll() {
         <span className="shine" /><Sparkles size={16} color={curTheme.accent} />
         <span className="lbl">{USE_AI ? (generating ? "Thinking…" : "Fresh ideas") : "More ideas"}</span>
       </div>
+
+      {showInstall && (
+        <div className="ms-install">
+          <div className="ms-install-icon"><Brain size={26} color="#D4A8FF" /></div>
+          <div className="ms-install-text">
+            <div className="ms-install-title">Add MindScroll</div>
+            <div className="ms-install-sub">Install for the full experience</div>
+          </div>
+          <div className="ms-install-btn" style={{ background: curTheme.accent }} onClick={triggerInstall}>
+            <Download size={15} style={{ display: "inline", marginRight: 6, verticalAlign: "middle" }} />Install
+          </div>
+          <X className="ms-install-x" size={20} onClick={() => setShowInstall(false)} />
+        </div>
+      )}
 
       {showSaved && (
         <div className="ms-overlay">
