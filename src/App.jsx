@@ -80,6 +80,8 @@ function shuffle(a) { a = [...a]; for (let i = a.length - 1; i > 0; i--) { const
  */
 let livePool = [];
 
+const VALID_CATS = new Set(['philosophy', 'motivation', 'tech', 'wonder', 'models', 'word']);
+
 async function fetchFreshCards(categories, recentTexts) {
   const res = await fetch('/api/feed', {
     method: 'POST',
@@ -92,45 +94,50 @@ async function fetchFreshCards(categories, recentTexts) {
   });
   if (!res.ok) throw new Error(`/api/feed returned ${res.status}`);
   const data = await res.json();
-  return (data.cards || []).map((c) => ({
-    cat:    c.category,
-    text:   clean(c.text),
-    author: c.author   || '—',
-    note:   c.note     || '',
-    url:    c.sourceUrl || '',
-    source: c.sourceName || 'Live',
-    live: true,
-    id: uid(),
-  }));
+  const cards = (data.cards || [])
+    .map((c) => ({
+      // API returns "category"; map to our internal "cat" used for theming
+      cat:    VALID_CATS.has(c.category) ? c.category : 'wonder',
+      text:   clean(c.text || ''),
+      author: c.author    || '—',
+      note:   c.note      || '',
+      url:    c.sourceUrl  || '',
+      source: c.sourceName || 'Live',
+      live: true,
+      id: uid(),
+    }))
+    .filter((c) => c.text.length > 5); // drop empty/malformed cards
+  console.log('live cards:', cards.length, '| sample cat:', cards[0]?.cat, '| sample text:', cards[0]?.text?.slice(0, 60));
+  return cards;
 }
 
+/* matchesCat: live cards always have a specific cat; "all" view accepts any */
+const matchesCat = (card, cat) => cat === 'all' || card.cat === cat;
+
 async function getLiveRaw(cat, n, recentTexts) {
-  /* Word of the day bypasses the feed endpoint */
   if (cat === 'word')   return srcWord();
-  /* Mental-models cards are curated-only; no external source covers them well */
   if (cat === 'models') return [];
 
-  /* 1 — drain whatever is already in the pool for this category */
+  /* 1 — drain pool for this category (or any category when cat === 'all') */
   const out = [], rest = [];
   for (const c of livePool) {
-    if (out.length < n && (cat === 'all' || c.cat === cat)) out.push(c);
+    if (out.length < n && matchesCat(c, cat)) out.push(c);
     else rest.push(c);
   }
   livePool = rest;
   if (out.length >= n) return out;
 
-  /* 2 — pool is low: hit /api/feed for a fresh batch */
+  /* 2 — pool low: fetch from /api/feed */
   const cats = cat === 'all'
     ? ['philosophy', 'motivation', 'tech', 'wonder']
     : [cat];
-
-  const fresh = await fetchFreshCards(cats, recentTexts); // throws on error
+  const fresh = await fetchFreshCards(cats, recentTexts); // throws on error → appendMore catches
   livePool.push(...fresh);
 
   /* 3 — drain again after refill */
   const out2 = [], rest2 = [];
   for (const c of livePool) {
-    if (out2.length < n - out.length && (cat === 'all' || c.cat === cat)) out2.push(c);
+    if (out2.length < n - out.length && matchesCat(c, cat)) out2.push(c);
     else rest2.push(c);
   }
   livePool = rest2;
@@ -322,16 +329,15 @@ export default function MindScroll() {
       const fresh = [];
       for (const c of raw) {
         const h = hashText(c.text);
-        if (seenRef.current.has(h)) continue;
+        // Only skip exact duplicates within this session, not across all historical sessions
+        if (fresh.some((f) => hashText(f.text) === h)) continue;
         seenRef.current.add(h);
-        // Track raw text for Claude's "avoid repeats" context
         recentTexts.current.push(c.text.slice(0, 120));
         if (recentTexts.current.length > 80) recentTexts.current.shift();
         fresh.push({ ...c, id: c.id || uid() });
       }
       if (fresh.length) { setLiveOn(true); }
       persistSeen();
-      // Only fall back to curated if live returned nothing at all
       const batch = fresh.length > 0 ? fresh : build(cat).slice(0, 5);
       // On first load, put live cards at the top so they're seen immediately
       setFeed((f) => prepend ? [...batch, ...f] : [...f, ...batch]);
