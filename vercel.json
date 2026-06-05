@@ -1,6 +1,6 @@
 {
   "functions": {
-    "api/content.js": {
+    "api/feed.js": {
       "maxDuration": 15
     }
   },
