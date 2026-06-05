@@ -69,128 +69,161 @@ const LIBRARY = [
 ];
 
 /* ====================== LIVE SOURCES ====================== */
-let zenPool = [];
-let quotablePool = [];
-let wikiPool = [];
-let wikiRandomPool = [];
-let devPool = [];
+/* Pools (module-level so they survive re-renders) */
+const pool = { zen: [], quotable: [], wikiOTD: [], wikiRandom: [], dev: [], til: [], shower: [], redditQuotes: [], redditPhil: [], redditMotiv: [], redditTech: [] };
 let allRotate = 0;
 
 const hashText = (s) => { let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0; return 'h' + (h >>> 0).toString(36); };
 const clean = (s) => (s || '').replace(/[`´]/g, "'").replace(/\s+/g, ' ').trim();
-function shuffle(a) { a = [...a]; for (let i = a.length - 1; i > 0; i--) { const j = (Math.random() * (i + 1)) | 0;[a[i], a[j]] = [a[j], a[i]]; } return a; }
+function shuffle(a) { a = [...a]; for (let i = a.length - 1; i > 0; i--) { const j = (Math.random() * (i + 1)) | 0; [a[i], a[j]] = [a[j], a[i]]; } return a; }
 
 const BAD = /\b(kill(ed|s|ing)?|murder|massacre|dead|death|die[ds]?|suicide|rape|genocide|nazi|war crime|atrocit)\b/i;
+const REDDIT_UA = 'MindScroll/1.0';
+
+/* ── Reddit (primary source — millions of upvoted posts, fresh daily) ── */
+async function fetchReddit(sub, sort = 'top', time = 'day', limit = 50) {
+  try {
+    const url = 'https://www.reddit.com/r/' + sub + '/' + sort + '.json?limit=' + limit + (time ? '&t=' + time : '') + '&raw_json=1';
+    const d = await (await fetch(url, { headers: { 'Accept': 'application/json' } })).json();
+    return (d?.data?.children || []).map(c => c.data).filter(p => p && !p.over_18 && p.score > 50 && p.title && !BAD.test(p.title));
+  } catch { return []; }
+}
+
+async function ensureReddit(key, sub, sort, time, transform) {
+  if (pool[key].length > 3) return;
+  const posts = await fetchReddit(sub, sort, time);
+  pool[key].push(...shuffle(posts).map(transform));
+}
+
+const redditCard = (cat, note) => p => ({
+  cat, text: clean(p.title), author: note,
+  note: p.score.toLocaleString() + ' upvotes · r/' + p.subreddit,
+  url: 'https://reddit.com' + p.permalink, source: 'Reddit', live: true
+});
+
+/* Philosophy: r/Showerthoughts + r/philosophy */
+async function srcPhilosophy(n) {
+  await Promise.allSettled([
+    ensureReddit('shower', 'Showerthoughts', 'top', 'day', redditCard('philosophy', 'Shower Thought')),
+    ensureReddit('redditPhil', 'philosophy', 'top', 'week', redditCard('philosophy', 'r/philosophy')),
+    pool.quotable.length < n ? fetchQuotable('philosophy|wisdom|stoicism').then(items => pool.quotable.push(...items)) : Promise.resolve(),
+    pool.zen.length < n ? fetchZen() : Promise.resolve(),
+  ]);
+  return interleave(n, pool.shower, pool.redditPhil, pool.quotable, pool.zen);
+}
+
+/* Motivation/Fire: r/GetMotivated + r/quotes */
+async function srcMotivation(n) {
+  await Promise.allSettled([
+    ensureReddit('redditMotiv', 'GetMotivated', 'top', 'day', p => ({ cat: 'motivation', text: clean(p.title.replace(/^[.*?]s*/,'')), author: 'r/GetMotivated', note: p.score.toLocaleString() + ' upvotes', url: 'https://reddit.com' + p.permalink, source: 'Reddit', live: true })),
+    ensureReddit('redditQuotes', 'quotes', 'top', 'week', p => ({ cat: 'motivation', text: clean(p.title), author: 'r/quotes', note: p.score.toLocaleString() + ' upvotes', url: 'https://reddit.com' + p.permalink, source: 'Reddit', live: true })),
+    pool.quotable.length < n ? fetchQuotable('inspirational|motivational|success').then(items => pool.quotable.push(...items)) : Promise.resolve(),
+    pool.zen.length < n ? fetchZen() : Promise.resolve(),
+  ]);
+  return interleave(n, pool.redditMotiv, pool.redditQuotes, pool.quotable, pool.zen);
+}
+
+/* Tech: r/technology + HN + Dev.to */
+async function srcTech(n) {
+  await Promise.allSettled([
+    ensureReddit('redditTech', 'technology', 'top', 'day', p => ({ cat: 'tech', text: clean(p.title), author: 'r/technology', note: p.score.toLocaleString() + ' upvotes · ' + (p.num_comments || 0) + ' comments', url: p.url || 'https://reddit.com' + p.permalink, source: 'Reddit', live: true })),
+    srcHN(Math.ceil(n / 3)).then(cards => pool.dev.push(...cards)),
+    srcDevTo(Math.ceil(n / 3)).then(cards => pool.dev.push(...cards)),
+  ]);
+  return interleave(n, pool.redditTech, pool.dev);
+}
+
+/* Wonder: r/todayilearned + Wikipedia Random + NASA + Numbers */
+async function srcWonder(n) {
+  await Promise.allSettled([
+    ensureReddit('til', 'todayilearned', 'top', 'day', p => {
+      const text = clean(p.title).replace(/^TILs*(thats*)?:?s*/i, '');
+      return { cat: 'wonder', text, author: 'Today I Learned', note: p.score.toLocaleString() + ' upvotes · r/todayilearned', url: 'https://reddit.com' + p.permalink, source: 'Reddit', live: true };
+    }),
+    pool.wikiRandom.length < n ? fetchWikiRandom() : Promise.resolve(),
+    fetchWikiOTD(),
+    srcNASA().then(c => c && pool.wikiOTD.push(c)),
+    srcNumbers().then(c => c && pool.wikiOTD.push(c)),
+    srcFact().then(c => c && pool.wikiOTD.push(c)),
+  ]);
+  return interleave(n, pool.til, pool.wikiRandom, pool.wikiOTD);
+}
+
+/* Helpers */
+function interleave(n, ...sources) {
+  const out = [];
+  const maxLen = Math.max(...sources.map(s => s.length));
+  for (let i = 0; i < maxLen && out.length < n * 2; i++) {
+    for (const s of sources) { if (s[i]) out.push(s[i]); }
+  }
+  // consume from sources
+  const used = out.slice(0, n);
+  used.forEach(card => {
+    for (const s of sources) {
+      const idx = s.indexOf(card);
+      if (idx !== -1) { s.splice(idx, 1); break; }
+    }
+  });
+  return used;
+}
 
 /* ── ZenQuotes ── */
 async function fetchZen() {
   try {
     const d = await (await fetch('https://zenquotes.io/api/quotes')).json();
-    if (Array.isArray(d)) {
-      const next = d.filter((x) => x.q && x.a && x.a.toLowerCase() !== 'zenquotes.io').map((x) => ({ q: clean(x.q), a: clean(x.a) }));
-      if (next.length) zenPool = shuffle(next);
-    }
+    if (Array.isArray(d)) pool.zen.push(...shuffle(d.filter(x => x.q && x.a && x.a.toLowerCase() !== 'zenquotes.io').map(x => ({ cat: 'philosophy', text: clean(x.q), author: clean(x.a), note: '', source: 'ZenQuotes', url: 'https://zenquotes.io', live: true }))));
   } catch { }
 }
 
-/* ── Quotable.io (2,000+ tagged quotes) ── */
+/* ── Quotable.io ── */
 async function fetchQuotable(tag) {
   try {
     const d = await (await fetch('https://api.quotable.io/quotes/random?limit=20&tags=' + tag + '&minLength=30&maxLength=180')).json();
-    const items = (Array.isArray(d) ? d : []).filter((x) => x.content && x.author);
-    quotablePool.push(...shuffle(items));
-  } catch { }
+    return (Array.isArray(d) ? d : []).filter(x => x.content && x.author).map(x => ({ cat: 'philosophy', text: clean(x.content), author: clean(x.author), note: (x.tags || []).join(' · '), source: 'Quotable', url: 'https://en.wikipedia.org/wiki/' + encodeURIComponent(x.author), live: true }));
+  } catch { return []; }
 }
 
-async function srcQuotes(cat, n) {
-  const tag = cat === 'philosophy' ? 'philosophy|wisdom|stoicism' : 'inspirational|motivational|success';
-  await Promise.allSettled([
-    zenPool.length < n ? fetchZen() : Promise.resolve(),
-    quotablePool.length < n ? fetchQuotable(tag) : Promise.resolve(),
-  ]);
-  const out = [];
-  while (out.length < n) {
-    const useQuotable = quotablePool.length > 0 && (out.length % 2 === 0 || !zenPool.length);
-    if (useQuotable) {
-      const q = quotablePool.shift();
-      out.push({ cat, text: clean(q.content), author: clean(q.author), note: (q.tags || []).join(' · '), source: 'Quotable', url: 'https://en.wikipedia.org/wiki/' + encodeURIComponent(q.author), live: true });
-    } else if (zenPool.length) {
-      const q = zenPool.shift();
-      out.push({ cat, text: q.q, author: q.a, note: '', source: 'ZenQuotes', url: 'https://zenquotes.io', live: true });
-    } else break;
-  }
-  return out;
-}
-
-/* ── Hacker News (trending tech, hourly) ── */
-const HN_Q = ['artificial intelligence', 'machine learning', 'large language model', 'robotics', 'neural network', 'open source AI', 'semiconductor', 'quantum computing', 'breakthrough', 'startup', 'developer tools'];
+/* ── Hacker News ── */
+const HN_Q = ['artificial intelligence', 'machine learning', 'LLM', 'robotics', 'open source AI', 'quantum computing', 'startup', 'developer tools', 'software engineering'];
 async function srcHN(n) {
   try {
     const q = HN_Q[(Math.random() * HN_Q.length) | 0];
     const d = await (await fetch('https://hn.algolia.com/api/v1/search?query=' + encodeURIComponent(q) + '&tags=story&numericFilters=points%3E80&hitsPerPage=25')).json();
-    const hits = (d.hits || []).filter((h) => h.title && !BAD.test(h.title));
-    return shuffle(hits).slice(0, n).map((h) => ({ cat: 'tech', text: clean(h.title), author: 'Hacker News', note: h.points + ' points' + (h.num_comments ? ' · ' + h.num_comments + ' comments' : '') + ' · trending right now', url: h.url || 'https://news.ycombinator.com/item?id=' + h.objectID, source: h.url ? 'the source' : 'Hacker News', live: true }));
+    return shuffle((d.hits || []).filter(h => h.title && !BAD.test(h.title))).slice(0, n).map(h => ({ cat: 'tech', text: clean(h.title), author: 'Hacker News', note: h.points + ' points · trending right now', url: h.url || 'https://news.ycombinator.com/item?id=' + h.objectID, source: 'Hacker News', live: true }));
   } catch { return []; }
 }
 
-/* ── Dev.to (fresh articles published this week) ── */
-async function fetchDevTo() {
+/* ── Dev.to ── */
+async function srcDevTo(n) {
   try {
     const d = await (await fetch('https://dev.to/api/articles?top=7&per_page=20')).json();
-    devPool = shuffle((Array.isArray(d) ? d : []).filter((a) => a.title && !BAD.test(a.title) && a.reading_time_minutes > 1));
-  } catch { }
-}
-async function srcDevTo(n) {
-  if (devPool.length < n) await fetchDevTo();
-  const out = [];
-  while (out.length < n && devPool.length) {
-    const a = devPool.shift();
-    const tags = (a.tag_list || []).slice(0, 3).join(' · ');
-    out.push({ cat: 'tech', text: clean(a.title), author: a.user?.name || 'Dev.to', note: a.reading_time_minutes + ' min read' + (tags ? ' · ' + tags : '') + ' · Dev.to', url: a.url, source: 'Dev.to', live: true });
-  }
-  return out;
+    return shuffle((Array.isArray(d) ? d : []).filter(a => a.title && !BAD.test(a.title) && a.reading_time_minutes > 1)).slice(0, n).map(a => ({ cat: 'tech', text: clean(a.title), author: a.user?.name || 'Dev.to', note: a.reading_time_minutes + ' min read · Dev.to', url: a.url, source: 'Dev.to', live: true }));
+  } catch { return []; }
 }
 
-async function srcTech(n) {
-  const [hn, dev] = await Promise.allSettled([srcHN(Math.ceil(n / 2)), srcDevTo(Math.floor(n / 2))]);
-  const hnCards = hn.status === 'fulfilled' ? hn.value : [];
-  const devCards = dev.status === 'fulfilled' ? dev.value : [];
-  const merged = [];
-  for (let i = 0; i < Math.max(hnCards.length, devCards.length); i++) {
-    if (hnCards[i]) merged.push(hnCards[i]);
-    if (devCards[i]) merged.push(devCards[i]);
-  }
-  return merged.slice(0, n);
+/* ── Wikipedia Random ── */
+async function fetchWikiRandom() {
+  try {
+    const results = await Promise.allSettled(Array.from({ length: 5 }, () => fetch('https://en.wikipedia.org/api/rest_v1/page/random/summary').then(r => r.json())));
+    pool.wikiRandom.push(...results.filter(r => r.status === 'fulfilled').map(r => r.value).filter(p => p.extract && p.extract.length > 80 && !BAD.test(p.extract) && p.type === 'standard').map(p => ({ cat: 'wonder', text: p.title, author: 'Wikipedia', note: clean(p.extract.split('. ').slice(0, 2).join('. ').slice(0, 220)), url: p.content_urls?.desktop?.page, source: 'Wikipedia', live: true })));
+  } catch { }
 }
 
 /* ── Wikipedia On This Day ── */
 async function fetchWikiOTD() {
   try {
-    const mm = String(new Date().getMonth() + 1).padStart(2, '0');
-    const dd = String(new Date().getDate()).padStart(2, '0');
+    const mm = String(new Date().getMonth() + 1).padStart(2, '0'), dd = String(new Date().getDate()).padStart(2, '0');
     const d = await (await fetch('https://en.wikipedia.org/api/rest_v1/feed/onthisday/selected/' + mm + '/' + dd)).json();
-    const items = [...(d.selected || []), ...(d.events || [])].filter((x) => x.text && !BAD.test(x.text)).map((x) => ({ text: clean(x.text), year: x.year, url: x.pages?.[0]?.content_urls?.desktop?.page }));
-    if (items.length) wikiPool = shuffle(items);
+    const items = [...(d.selected || []), ...(d.events || [])].filter(x => x.text && !BAD.test(x.text)).map(x => ({ cat: 'wonder', text: clean(x.text), author: x.year ? 'On this day · ' + x.year : 'On this day', note: 'A moment in history worth knowing.', url: x.pages?.[0]?.content_urls?.desktop?.page, source: 'Wikipedia', live: true }));
+    pool.wikiOTD.push(...shuffle(items));
   } catch { }
 }
 
-/* ── Wikipedia Random Summary (infinite fresh articles) ── */
-async function fetchWikiRandom() {
-  try {
-    const results = await Promise.allSettled(Array.from({ length: 4 }, () => fetch('https://en.wikipedia.org/api/rest_v1/page/random/summary').then((r) => r.json())));
-    const items = results.filter((r) => r.status === 'fulfilled').map((r) => r.value).filter((p) => p.extract && p.extract.length > 80 && !BAD.test(p.extract) && p.type === 'standard');
-    wikiRandomPool.push(...shuffle(items));
-  } catch { }
-}
-
-/* ── NASA Astronomy Picture of the Day ── */
+/* ── NASA APOD ── */
 async function srcNASA() {
   try {
     const d = await (await fetch('https://api.nasa.gov/planetary/apod?api_key=DEMO_KEY')).json();
-    if (d.title && d.explanation && !BAD.test(d.explanation)) {
-      const note = d.explanation.split('. ').slice(0, 2).join('. ').slice(0, 220) + '.';
-      return { cat: 'wonder', text: d.title, author: 'NASA · ' + d.date, note: clean(note), url: d.hdurl || d.url, source: 'NASA APOD', live: true };
-    }
+    if (d.title && d.explanation && !BAD.test(d.explanation)) return { cat: 'wonder', text: d.title, author: 'NASA · ' + d.date, note: clean(d.explanation.split('. ').slice(0, 2).join('. ').slice(0, 220) + '.'), url: d.hdurl || d.url, source: 'NASA APOD', live: true };
   } catch { }
   return null;
 }
@@ -214,37 +247,18 @@ async function srcFact() {
   return null;
 }
 
-async function srcWonder(n) {
-  const [, , nasa, num, fact] = await Promise.allSettled([
-    wikiPool.length < 2 ? fetchWikiOTD() : Promise.resolve(),
-    wikiRandomPool.length < n ? fetchWikiRandom() : Promise.resolve(),
-    srcNASA(), srcNumbers(), srcFact(),
-  ]);
-  const out = [];
-  if (nasa.status === 'fulfilled' && nasa.value) out.push(nasa.value);
-  while (out.length < Math.ceil(n / 3) && wikiPool.length) {
-    const w = wikiPool.shift();
-    out.push({ cat: 'wonder', text: w.text, author: w.year ? 'On this day · ' + w.year : 'On this day', note: 'A moment in history worth knowing.', url: w.url, source: 'Wikipedia', live: true });
-  }
-  while (out.length < n - 2 && wikiRandomPool.length) {
-    const p = wikiRandomPool.shift();
-    const summary = p.extract.split('. ').slice(0, 2).join('. ').slice(0, 220);
-    out.push({ cat: 'wonder', text: p.title, author: 'Wikipedia', note: clean(summary), url: p.content_urls?.desktop?.page, source: 'Wikipedia', live: true });
-  }
-  if (num.status === 'fulfilled' && num.value) out.push(num.value);
-  if (fact.status === 'fulfilled' && fact.value && out.length < n) out.push(fact.value);
-  return out.slice(0, n);
-}
-
 async function getLiveRaw(cat, n) {
-  if (cat === 'philosophy' || cat === 'motivation') return srcQuotes(cat, n);
+  if (cat === 'philosophy') return srcPhilosophy(n);
+  if (cat === 'motivation') return srcMotivation(n);
   if (cat === 'tech') return srcTech(n);
   if (cat === 'wonder') return srcWonder(n);
   if (cat === 'models') return [];
   if (cat === 'word') return srcWord();
-  const order = [() => srcQuotes('philosophy', n), () => srcTech(n), () => srcWonder(n), () => srcQuotes('motivation', n)];
+  // 'all' — rotate across all sources
+  const order = [() => srcPhilosophy(n), () => srcTech(n), () => srcWonder(n), () => srcMotivation(n)];
   return order[(allRotate++) % order.length]();
 }
+
 
 
 /* ====================== WORD OF THE DAY ====================== */
@@ -415,9 +429,8 @@ export default function MindScroll() {
   const persistSeen = () => {
     clearTimeout(seenTimer.current);
     seenTimer.current = setTimeout(() => {
-      const tk = todayKey();
-      store.set("seenHashes", { d: tk, hashes: [...seenRef.current].slice(-600) });
-      store.set("seenCurated", { d: tk, keys: [...seenCurated.current] });
+      store.set("seenHashes", [...seenRef.current].slice(-5000));
+      store.set("seenCurated", { d: todayKey(), keys: [...seenCurated.current] });
     }, 700);
   };
 
@@ -451,13 +464,12 @@ export default function MindScroll() {
   useEffect(() => {
     (async () => {
       setSaved(await store.get("saved", []));
-      // Reset live-seen hashes daily so fresh API content flows each new day
-      const seenStored = await store.get("seenHashes", { d: "", hashes: [] });
-      const tk0 = todayKey();
-      seenRef.current = (seenStored.d === tk0 && Array.isArray(seenStored.hashes))
-        ? new Set(seenStored.hashes) : new Set();
-      // Load daily curated-seen set; reset each new day so content feels fresh
+      // seenHashes: permanent across sessions — once seen, never repeated until pool > 5000
+      const seenStored = await store.get("seenHashes", []);
+      seenRef.current = new Set(Array.isArray(seenStored) ? seenStored : []);
+      // seenCurated: resets when all 40 curated cards are exhausted (handled in build())
       const sc = await store.get("seenCurated", { d: "", keys: [] });
+      const tk0 = todayKey();
       seenCurated.current = sc.d === tk0 ? new Set(sc.keys) : new Set();
       const last = await store.get("lastVisit", null);
       const st = await store.get("streak", 0);
