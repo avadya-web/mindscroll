@@ -81,7 +81,7 @@ async function fetchFreshCards(categories, recentTexts) {
   const res = await fetch("/api/feed", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ categories, recentlySeen: recentTexts.slice(-60), count: 8 }),
+    body: JSON.stringify({ categories, recentlySeen: recentTexts.slice(-60), count: 10 }),
   });
   if (!res.ok) throw new Error(`/api/feed returned ${res.status}`);
   const data = await res.json();
@@ -298,9 +298,7 @@ export default function MindScroll() {
     })();
   }, []);
 
-  /* (re)load on boot + category change.
-     Instant opener (one curated card, no spinner) for live categories, then
-     fresh cards stream in behind it — so there's never a blank wait. */
+  /* (re)load on boot + category change — fresh content leads */
   useEffect(() => {
     if (!ready) return;
     counted.current = new Set();
@@ -308,16 +306,9 @@ export default function MindScroll() {
     busyRef.current = false;
     setLiveOn(false);
     setActive(0);
+    setFeed([]);
     if (feedRef.current) feedRef.current.scrollTo({ top: 0 });
-    const liveCat = activeCat !== "word" && activeCat !== "models";
-    if (liveCat) {
-      setFeed(buildCurated(activeCat, seenCurated.current).slice(0, 1)); // instant opener
-      setLoading(false);
-      loadFeed(activeCat, true);   // stream fresh cards in behind it
-    } else {
-      setFeed([]);
-      loadFeed(activeCat, false);  // word/models are fast or local
-    }
+    loadFeed(activeCat, false);
   }, [activeCat, ready, loadFeed]);
 
   /* track active card + reveal animation + daily counter */
@@ -344,7 +335,7 @@ export default function MindScroll() {
 
   /* infinite: fetch more as you near the end (not for single-card 'word') */
   useEffect(() => {
-    if (ready && !loading && !busyRef.current && feed.length > 0 && activeCat !== "word" && active >= feed.length - 3) {
+    if (ready && !loading && feed.length > 0 && activeCat !== "word" && active >= feed.length - 3) {
       loadFeed(activeCat, true);
     }
   }, [active, feed.length, activeCat, ready, loading, loadFeed]);
